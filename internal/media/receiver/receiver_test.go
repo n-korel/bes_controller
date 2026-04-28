@@ -10,6 +10,322 @@ import (
 	pionrtp "github.com/pion/rtp"
 )
 
+func TestReceiver_StopWithoutStart_NoHang(t *testing.T) {
+	r := New(0)
+	stats, err := r.Stop()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if stats.Received != 0 {
+		t.Fatalf("stats.Received=%d want 0", stats.Received)
+	}
+}
+
+func TestReceiver_StartTwice_DoesNotRestart(t *testing.T) {
+	r := New(0)
+	if err := r.StartBySoundType(99); err != nil {
+		t.Fatalf("StartBySoundType(99): %v", err)
+	}
+	if err := r.StartBySoundType(99); err != nil {
+		t.Fatalf("StartBySoundType(99) second: %v", err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	stats, err := r.Stop()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if stats.Received == 0 {
+		t.Fatalf("stats.Received=0 want >0")
+	}
+	if r.IsPlaying() {
+		t.Fatalf("IsPlaying=true want false")
+	}
+}
+
+func TestReceiver_UpdateStats_NoOpWhenNotPlaying(t *testing.T) {
+	r := &Receiver{playing: false}
+	r.updateStats(1, 1)
+	if r.stats.Received != 0 {
+		t.Fatalf("stats.Received=%d want 0", r.stats.Received)
+	}
+}
+
+func TestReceiver_RTP_StopWithoutPackets_ReturnsQuicklyAndCleansConn(t *testing.T) {
+	r := New(0)
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1): %v", err)
+	}
+	if r.Conn() == nil {
+		_, _ = r.Stop()
+		t.Fatalf("Conn()=nil want non-nil after start")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Stop()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Stop timed out (likely blocked in ReadFromUDP)")
+	}
+
+	if r.IsPlaying() {
+		t.Fatalf("IsPlaying=true want false")
+	}
+	if r.Conn() != nil {
+		t.Fatalf("Conn() non-nil after Stop, want nil")
+	}
+}
+
+func TestReceiver_RTP_RestartAfterStop_Works(t *testing.T) {
+	r := New(0)
+
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1): %v", err)
+	}
+	port1 := r.MediaPort()
+	if port1 == 0 {
+		_, _ = r.Stop()
+		t.Fatalf("MediaPort=0 want non-zero")
+	}
+	if _, err := r.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1) second: %v", err)
+	}
+	port2 := r.MediaPort()
+	if port2 == 0 {
+		_, _ = r.Stop()
+		t.Fatalf("MediaPort=0 want non-zero on restart")
+	}
+	if _, err := r.Stop(); err != nil {
+		t.Fatalf("Stop second: %v", err)
+	}
+}
+
+func TestReceiver_StartBySoundType_Unknown_DoesNotStart(t *testing.T) {
+	r := New(0)
+	if err := r.StartBySoundType(12345); err != nil {
+		t.Fatalf("StartBySoundType(unknown): %v", err)
+	}
+	if r.IsPlaying() {
+		t.Fatalf("IsPlaying=true want false for unknown sound type")
+	}
+	if r.Conn() != nil {
+		t.Fatalf("Conn() non-nil want nil for unknown sound type")
+	}
+}
+
+func TestReceiver_RTP_StopDuringActiveReceive_ReturnsAndStatsNonZero(t *testing.T) {
+	r := New(0)
+	gotPCM := make(chan []int16, 8)
+	r.SetPCMSink(func(pcm []int16) {
+		select {
+		case gotPCM <- pcm:
+		default:
+		}
+	})
+
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1): %v", err)
+	}
+	port := r.MediaPort()
+	if port == 0 {
+		_, _ = r.Stop()
+		t.Fatalf("MediaPort=0 want non-zero")
+	}
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		_, _ = r.Stop()
+		t.Fatalf("DialUDP: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	sendPkt := func(seq uint16, ts uint32) {
+		t.Helper()
+		pkt := &pionrtp.Packet{
+			Header: pionrtp.Header{
+				Version:        2,
+				PayloadType:    mediarpt.PayloadTypeG726(),
+				SequenceNumber: seq,
+				Timestamp:      ts,
+				SSRC:           0x01020304,
+			},
+			Payload: []byte{0x11, 0x22, 0x33, 0x44},
+		}
+		raw, err := pkt.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		_, _ = conn.Write(raw)
+	}
+
+	// отправим несколько пакетов, чтобы гарантировать работу цикла чтения
+	for i := 0; i < 3; i++ {
+		sendPkt(uint16(100+i), uint32(160*(i+1)))
+	}
+
+	// дождёмся хотя бы одного PCM callback (или таймаут)
+	select {
+	case <-gotPCM:
+	case <-time.After(500 * time.Millisecond):
+		// если PCM callback не пришёл, всё равно попробуем Stop и проверим статистику
+	}
+
+	done := make(chan struct{})
+	var stats SessionStats
+	var stopErr error
+	go func() {
+		defer close(done)
+		stats, stopErr = r.Stop()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Stop timed out during active receive")
+	}
+	if stopErr != nil {
+		t.Fatalf("Stop: %v", stopErr)
+	}
+	if stats.Received == 0 {
+		t.Fatalf("stats.Received=0 want >0")
+	}
+	if stats.LastPacket.IsZero() {
+		t.Fatalf("stats.LastPacket is zero want non-zero")
+	}
+}
+
+func TestReceiver_RTP_ExpectedAndLost_WithSequenceGap(t *testing.T) {
+	r := New(0)
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1): %v", err)
+	}
+	port := r.MediaPort()
+	if port == 0 {
+		_, _ = r.Stop()
+		t.Fatalf("MediaPort=0 want non-zero")
+	}
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		_, _ = r.Stop()
+		t.Fatalf("DialUDP: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	sendPkt := func(seq uint16, ts uint32) {
+		t.Helper()
+		pkt := &pionrtp.Packet{
+			Header: pionrtp.Header{
+				Version:        2,
+				PayloadType:    mediarpt.PayloadTypeG726(),
+				SequenceNumber: seq,
+				Timestamp:      ts,
+				SSRC:           0x01020304,
+			},
+			Payload: []byte{0x11, 0x22, 0x33, 0x44},
+		}
+		raw, err := pkt.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		_, _ = conn.Write(raw)
+	}
+
+	// seq gap: 10, 11, 13 -> expected = 4, received = 3, lost = 1
+	sendPkt(10, 160)
+	sendPkt(11, 320)
+	sendPkt(13, 640)
+
+	// Дадим горутине приёма чуть времени обработать пакеты.
+	time.Sleep(50 * time.Millisecond)
+
+	stats, err := r.Stop()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got, want := stats.Received, uint32(3); got != want {
+		t.Fatalf("stats.Received=%d want %d", got, want)
+	}
+	if got, want := stats.Expected(), uint32(4); got != want {
+		t.Fatalf("stats.Expected()=%d want %d", got, want)
+	}
+	if got, want := stats.Lost(), uint32(1); got != want {
+		t.Fatalf("stats.Lost()=%d want %d", got, want)
+	}
+}
+
+func TestReceiver_RTP_WrapAroundSequence_IncreasesCycles(t *testing.T) {
+	r := New(0)
+	if err := r.StartBySoundType(1); err != nil {
+		t.Fatalf("StartBySoundType(1): %v", err)
+	}
+	port := r.MediaPort()
+	if port == 0 {
+		_, _ = r.Stop()
+		t.Fatalf("MediaPort=0 want non-zero")
+	}
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		_, _ = r.Stop()
+		t.Fatalf("DialUDP: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	sendPkt := func(seq uint16, ts uint32) {
+		t.Helper()
+		pkt := &pionrtp.Packet{
+			Header: pionrtp.Header{
+				Version:        2,
+				PayloadType:    mediarpt.PayloadTypeG726(),
+				SequenceNumber: seq,
+				Timestamp:      ts,
+				SSRC:           0x01020304,
+			},
+			Payload: []byte{0x11, 0x22, 0x33, 0x44},
+		}
+		raw, err := pkt.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		_, _ = conn.Write(raw)
+	}
+
+	// wrap-around: 65534, 65535, 0, 1 with newer RTP timestamps
+	sendPkt(65534, 160)
+	sendPkt(65535, 320)
+	sendPkt(0, 480)
+	sendPkt(1, 640)
+
+	time.Sleep(60 * time.Millisecond)
+
+	stats, err := r.Stop()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got, want := stats.Received, uint32(4); got != want {
+		t.Fatalf("stats.Received=%d want %d", got, want)
+	}
+	if got, want := stats.Cycles, uint32(1<<16); got != want {
+		t.Fatalf("stats.Cycles=%d want %d", got, want)
+	}
+	if got, want := stats.Expected(), uint32(4); got != want {
+		t.Fatalf("stats.Expected()=%d want %d", got, want)
+	}
+	if got, want := stats.Lost(), uint32(0); got != want {
+		t.Fatalf("stats.Lost()=%d want %d", got, want)
+	}
+}
+
 func TestLatePacketDoesNotIncreaseCycles(t *testing.T) {
 	r := &Receiver{playing: true}
 

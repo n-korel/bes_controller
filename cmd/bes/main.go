@@ -68,20 +68,10 @@ func main() {
 	)
 
 	conversations := make(chan string, 16)
-	var (
-		stateUnregistered      uint32 = 0
-		stateRegistrationIdle  uint32 = 1
-		stateRegistrationQuery uint32 = 2
-		stateInCall            uint32 = 3
-	)
 	var state atomic.Uint32
 	state.Store(stateUnregistered)
 	var lastKeepAliveUnixNano atomic.Int64
 
-	type answerEvent struct {
-		answer *protocol.ClientAnswer
-		from   *net.UDPAddr
-	}
 	answers := make(chan answerEvent, 8)
 
 	var wg sync.WaitGroup
@@ -113,10 +103,7 @@ func main() {
 			}
 			if reset != nil {
 				logger.Info("ec_client_reset received", "head1", reset.IPHead1, "head2", reset.IPHead2, "from", raddr.IP.String())
-				// UNREGISTERED -> REGISTRATION (but don't interrupt an active call)
-				if state.Load() != stateInCall {
-					state.Store(stateRegistrationIdle)
-				}
+				onClientReset(&state)
 			}
 			if keepalive != nil {
 				logger.Debug("ec_server_keepalive received", "opensips_ip", keepalive.OpenSIPSIP, "status", keepalive.Status, "from", raddr.IP.String())
@@ -153,46 +140,6 @@ func main() {
 		return err
 	}
 
-	doPress := func() (sipID string, newIP string, err error) {
-		state.Store(stateRegistrationQuery)
-		defer func() {
-			if state.Load() == stateRegistrationQuery {
-				state.Store(stateRegistrationIdle)
-			}
-		}()
-		for attempt := 1; attempt <= cfg.EC.ClientQueryMaxRetries; attempt++ {
-			if err := sendQueryOnce(); err != nil {
-				logger.Warn("ec_client_query send failed", "err", err, "attempt", attempt)
-			} else {
-				logger.Info("ec_client_query sent", "attempt", attempt, "to", cfg.EC.BucisAddr, "port", cfg.EC.QueryPort6710)
-			}
-
-			timeout := time.NewTimer(cfg.EC.ClientAnswerTimeout)
-			select {
-			case <-ctx.Done():
-				timeout.Stop()
-				return "", "", ctx.Err()
-			case ev := <-answers:
-				timeout.Stop()
-				logger.Info("ec_client_answer received", "sip_id", ev.answer.SipID, "new_ip", ev.answer.NewIP, "from", ev.from.IP.String())
-				return ev.answer.SipID, ev.answer.NewIP, nil
-			case <-timeout.C:
-				// retry
-			}
-
-			if attempt < cfg.EC.ClientQueryMaxRetries {
-				timer := time.NewTimer(cfg.EC.ClientQueryRetryInterval)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return "", "", ctx.Err()
-				case <-timer.C:
-				}
-			}
-		}
-		return "", "", fmt.Errorf("no ec_client_answer after %d retries", cfg.EC.ClientQueryMaxRetries)
-	}
-
 	// KeepAlive heartbeat: log if we stop receiving keepalives.
 	{
 		timeout := cfg.EC.KeepAliveTimeout
@@ -208,21 +155,13 @@ func main() {
 					case <-ctx.Done():
 						return
 					case <-t.C:
+						now := time.Now()
 						s := state.Load()
-						if s == stateUnregistered {
-							continue
-						}
 						last := lastKeepAliveUnixNano.Load()
-						if last == 0 {
-							continue
-						}
-						age := time.Since(time.Unix(0, last))
-						if age <= timeout {
-							warnedAt = time.Time{}
-							continue
-						}
-						if warnedAt.IsZero() || time.Since(warnedAt) >= timeout {
-							warnedAt = time.Now()
+						warn, wa := keepaliveShouldWarn(s, last, timeout, now, warnedAt)
+						warnedAt = wa
+						if warn {
+							age := now.Sub(time.Unix(0, last))
 							logger.Warn("keepalive missing", "age", age.String(), "timeout", timeout.String())
 						}
 					}
@@ -234,7 +173,11 @@ func main() {
 	// Раньше запуск ждал команду `press` из stdin. Теперь `bes` сразу инициирует ClientQuery и SIP звонок.
 	state.Store(stateRegistrationIdle)
 
-	sipID, newIP, err := doPress()
+	state.Store(stateRegistrationQuery)
+	sipID, newIP, err := doPress(ctx, logger, cfg, sendQueryOnce, answers)
+	if state.Load() == stateRegistrationQuery {
+		state.Store(stateRegistrationIdle)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		_ = lconn.Close()

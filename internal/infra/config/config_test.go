@@ -134,3 +134,53 @@ func TestParseBes_InvalidDurationFails(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseBes_InvalidIntFails(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_LISTEN_PORT_8890", "bad")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_InvalidKeepAliveTimeoutFails(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_KEEPALIVE_TIMEOUT", "bad")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_DotEnvDoesNotOverrideExistingEnv(t *testing.T) {
+	resetDotEnv(t)
+
+	// В .env поставим "плохой" broadcast IP, который сломал бы парсинг,
+	// но env должен иметь приоритет и предотвратить эту ошибку.
+	if err := os.WriteFile(".env", []byte("EC_BES_BROADCAST_ADDR=not-an-ip\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(".env") })
+
+	t.Setenv("EC_BES_BROADCAST_ADDR", "127.0.0.1")
+
+	_, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+}
+
+func TestParseBes_DotEnvInvalidLineFails(t *testing.T) {
+	resetDotEnv(t)
+
+	if err := os.WriteFile(".env", []byte("NO_EQUALS_HERE\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(".env") })
+
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}

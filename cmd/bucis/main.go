@@ -30,6 +30,9 @@ import (
 )
 
 func main() {
+	log.Init(os.Getenv("LOG_FORMAT"))
+	logger := log.With("role", "bucis")
+
 	var (
 		besAddrOverride string
 		besBroadcast    string
@@ -41,37 +44,51 @@ func main() {
 		head2 string
 	)
 
-	flag.StringVar(&besBroadcast, "ec-bes-broadcast-addr", "", "EC destination broadcast address for reset/keepalive (default from EC_BES_BROADCAST_ADDR)")
-	flag.StringVar(&besAddrOverride, "ec-bes-addr", "", "EC destination override for reset/keepalive (unicast) (default from EC_BES_ADDR)")
-	flag.StringVar(&opensipsIP, "ec-opensips-ip", "", "OpenSIPS IP to put into keepalive (default to local IP)")
-	flag.DurationVar(&resetInterval, "ec-reset-interval", 0, "ClientReset interval (default from EC_CLIENT_RESET_INTERVAL)")
-	flag.DurationVar(&keepAliveInt, "ec-keepalive-interval", 0, "KeepAlive interval (default from EC_KEEPALIVE_INTERVAL)")
-	flag.StringVar(&head1, "ec-head1-ip", "", "ClientReset head1 IP (default: local IP)")
-	flag.StringVar(&head2, "ec-head2-ip", "", "ClientReset head2 IP (default: head1)")
-	flag.Parse()
-	log.Init(os.Getenv("LOG_FORMAT"))
-	logger := log.With("role", "bucis")
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.ParseBucis()
-	if err != nil {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.StringVar(&besBroadcast, "ec-bes-broadcast-addr", "", "EC destination broadcast address for reset/keepalive (default from EC_BES_BROADCAST_ADDR)")
+	fs.StringVar(&besAddrOverride, "ec-bes-addr", "", "EC destination override for reset/keepalive (unicast) (default from EC_BES_ADDR)")
+	fs.StringVar(&opensipsIP, "ec-opensips-ip", "", "OpenSIPS IP to put into keepalive (default to local IP)")
+	fs.DurationVar(&resetInterval, "ec-reset-interval", 0, "ClientReset interval (default from EC_CLIENT_RESET_INTERVAL)")
+	fs.DurationVar(&keepAliveInt, "ec-keepalive-interval", 0, "KeepAlive interval (default from EC_KEEPALIVE_INTERVAL)")
+	fs.StringVar(&head1, "ec-head1-ip", "", "ClientReset head1 IP (default: local IP)")
+	fs.StringVar(&head2, "ec-head2-ip", "", "ClientReset head2 IP (default: head1)")
+
+	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	flag.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "ec-bes-broadcast-addr":
-			cfg.EC.BesBroadcastAddr = besBroadcast
-		case "ec-bes-addr":
-			cfg.EC.BesAddrOverride = besAddrOverride
-		case "ec-reset-interval":
-			cfg.EC.ClientResetInterval = resetInterval
-		case "ec-keepalive-interval":
-			cfg.EC.KeepAliveInterval = keepAliveInt
-		}
-	})
+
+	if err := run(ctx, logger, fs, besBroadcast, besAddrOverride, opensipsIP, resetInterval, keepAliveInt, head1, head2); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(
+	ctx context.Context,
+	logger interface {
+		Info(string, ...any)
+		Warn(string, ...any)
+		Debug(string, ...any)
+	},
+	fs *flag.FlagSet,
+	besBroadcast string,
+	besAddrOverride string,
+	opensipsIP string,
+	resetInterval time.Duration,
+	keepAliveInt time.Duration,
+	head1 string,
+	head2 string,
+) error {
+	cfg, err := config.ParseBucis()
+	if err != nil {
+		return err
+	}
+	applyECFlagOverrides(fs, &cfg, besBroadcast, besAddrOverride, resetInterval, keepAliveInt)
 	localIP := firstNonLoopbackIPv4()
 
 	if head1 == "" {
@@ -105,62 +122,7 @@ func main() {
 		"keepalive_interval", cfg.EC.KeepAliveInterval.String(),
 	)
 
-	type sipIDState struct {
-		mu  sync.Mutex
-		seq int
-		m   map[string]string // mac -> sipId
-		ip  map[string]string // sipId -> bes ip
-	}
-	sipIDs := sipIDState{m: make(map[string]string), ip: make(map[string]string)}
-	getSipID := func(mac string) string {
-		sipIDs.mu.Lock()
-		defer sipIDs.mu.Unlock()
-		if v, ok := sipIDs.m[mac]; ok {
-			return v
-		}
-		sipIDs.seq++
-		v := strconv.Itoa(sipIDs.seq)
-		sipIDs.m[mac] = v
-		return v
-	}
-	setSipIDIP := func(sipID string, besIP string) {
-		sipIDs.mu.Lock()
-		defer sipIDs.mu.Unlock()
-		if sipID == "" || besIP == "" {
-			return
-		}
-		sipIDs.ip[sipID] = besIP
-	}
-	getSipIDIP := func(sipID string) (string, bool) {
-		sipIDs.mu.Lock()
-		defer sipIDs.mu.Unlock()
-		v, ok := sipIDs.ip[sipID]
-		return v, ok
-	}
-	getSipIDByIP := func(besIP string) (string, bool) {
-		sipIDs.mu.Lock()
-		defer sipIDs.mu.Unlock()
-		for sipID, ip := range sipIDs.ip {
-			if ip == besIP {
-				return sipID, true
-			}
-		}
-		return "", false
-	}
-
-	enableUDPBroadcast := func(conn *net.UDPConn) error {
-		raw, err := conn.SyscallConn()
-		if err != nil {
-			return err
-		}
-		var serr error
-		if err := raw.Control(func(fd uintptr) {
-			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
-		}); err != nil {
-			return err
-		}
-		return serr
-	}
+	sipIDs := newSipIDState()
 
 	sendTo := func(ip string, port int, payload string) error {
 		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(ip, strconv.Itoa(port)))
@@ -180,10 +142,7 @@ func main() {
 	}
 
 	sendReset := func() {
-		dst := cfg.EC.BesBroadcastAddr
-		if cfg.EC.BesAddrOverride != "" {
-			dst = cfg.EC.BesAddrOverride
-		}
+		dst := chooseECdst(cfg.EC.BesBroadcastAddr, cfg.EC.BesAddrOverride)
 		msg := protocol.FormatClientReset(head1, head2)
 		if err := sendTo(dst, cfg.EC.ListenPort8890, msg); err != nil {
 			logger.Warn("ec_client_reset send failed", "err", err, "dst", dst)
@@ -193,10 +152,7 @@ func main() {
 	}
 
 	sendKeepAlive := func() {
-		dst := cfg.EC.BesBroadcastAddr
-		if cfg.EC.BesAddrOverride != "" {
-			dst = cfg.EC.BesAddrOverride
-		}
+		dst := chooseECdst(cfg.EC.BesBroadcastAddr, cfg.EC.BesAddrOverride)
 		msg := protocol.FormatKeepAlive(opensipsIP, "0")
 		if err := sendTo(dst, cfg.EC.ListenPort8890, msg); err != nil {
 			logger.Warn("ec_server_keepalive send failed", "err", err, "dst", dst)
@@ -260,7 +216,7 @@ func main() {
 				network := remote.Headers.GetOr("transport", "udp")
 				if network != "udp" {
 					logger.Warn("unsupported sip transport for answer", "network", network)
-					return
+					goto afterSIP
 				}
 				lhost := localIP
 				if ip := net.ParseIP(sipDomain); ip != nil && ip.IsLoopback() {
@@ -269,12 +225,12 @@ func main() {
 				laddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(lhost, "0"))
 				if err != nil {
 					logger.Warn("sip register: failed to resolve local addr", "err", err)
-					return
+					goto afterSIP
 				}
 				tmpConn, err := net.ListenUDP("udp4", laddr)
 				if err != nil {
 					logger.Warn("sip register: failed to reserve local port", "err", err)
-					return
+					goto afterSIP
 				}
 				lport := tmpConn.LocalAddr().(*net.UDPAddr).Port
 				_ = tmpConn.Close()
@@ -545,7 +501,7 @@ func main() {
 							ok    bool
 						)
 						if sipID != "" {
-							besIP, ok = getSipIDIP(sipID)
+							besIP, ok = sipIDs.getSipIDIP(sipID)
 						}
 						if !ok && dialog != nil && dialog.InviteRequest != nil {
 							// From.User может быть произвольным (SIP_USER_BES задан вручную). Fallback: берём IP источника INVITE.
@@ -555,7 +511,7 @@ func main() {
 								host = h
 							}
 							if host != "" {
-								if s, found := getSipIDByIP(host); found {
+								if s, found := sipIDs.getSipIDByIP(host); found {
 									sipID = s
 									besIP = host
 									ok = true
@@ -593,19 +549,18 @@ func main() {
 		}
 	}
 
+afterSIP:
 	listenQuery := func(port int) (*net.UDPConn, error) {
 		return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
 	}
 	c6710, err := listenQuery(cfg.EC.QueryPort6710)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return err
 	}
 	defer func() { _ = c6710.Close() }()
 	c7777, err := listenQuery(cfg.EC.QueryPort7777)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return err
 	}
 	defer func() { _ = c7777.Close() }()
 
@@ -632,13 +587,13 @@ func main() {
 			if !ok || query == nil {
 				continue
 			}
-			sipID := getSipID(query.MAC)
+			sipID := sipIDs.getSipID(query.MAC)
 
 			dst := raddr.IP.String()
 			if cfg.EC.BesAddrOverride != "" {
 				dst = cfg.EC.BesAddrOverride
 			}
-			setSipIDIP(sipID, dst)
+			sipIDs.setSipIDIP(sipID, dst)
 			msg := protocol.FormatClientAnswer(opensipsIP, sipID)
 			if err := sendTo(dst, cfg.EC.ListenPort8890, msg); err != nil {
 				logger.Warn("ec_client_answer send failed", "err", err, "dst", dst, "sip_id", sipID, "mac", query.MAC)
@@ -654,6 +609,7 @@ func main() {
 
 	<-ctx.Done()
 	wg.Wait()
+	return nil
 }
 
 func firstNonLoopbackIPv4() string {

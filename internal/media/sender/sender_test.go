@@ -13,25 +13,155 @@ import (
 	pionrtp "github.com/pion/rtp"
 )
 
-func TestStreamAt_EmptyPCMNoOp(t *testing.T) {
-	recv, err := udp.Join("127.0.0.1", 0)
+func TestSender_write_UsesWriteWhenConnected(t *testing.T) {
+	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
-		t.Fatalf("Join: %v", err)
+		t.Fatalf("ListenUDP: %v", err)
 	}
-	defer func() { _ = recv.Close() }()
+	defer func() { _ = srv.Close() }()
 
-	s, err := New("127.0.0.1", recv.LocalPort())
+	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewTo: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
-	ctx := context.Background()
-	if err := s.StreamAt(ctx, time.Now().UnixMilli(), nil); err != nil {
-		t.Fatalf("StreamAt nil: %v", err)
+	payload := []byte("hello")
+	if _, err := s.write(payload); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	if err := s.StreamAt(ctx, time.Now().UnixMilli(), []int16{}); err != nil {
-		t.Fatalf("StreamAt empty: %v", err)
+
+	buf := make([]byte, 64)
+	_ = srv.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	n, _, err := srv.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+	if got := string(buf[:n]); got != string(payload) {
+		t.Fatalf("got %q want %q", got, payload)
+	}
+}
+
+func TestSender_write_UsesWriteToUDPWhenNotConnected(t *testing.T) {
+	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	lconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP local: %v", err)
+	}
+	defer func() { _ = lconn.Close() }()
+
+	s, err := NewFromConn(lconn, srv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("NewFromConn: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	payload := []byte("hi")
+	if _, err := s.write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, 64)
+	_ = srv.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	n, _, err := srv.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+	if got := string(buf[:n]); got != string(payload) {
+		t.Fatalf("got %q want %q", got, payload)
+	}
+}
+
+func TestSender_StreamAt_RespectsCtxDuringInitialWait(t *testing.T) {
+	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("NewTo: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pcm := make([]int16, mediarpt.SamplesPerFrame)
+	err = s.StreamAt(ctx, time.Now().Add(5*time.Second).UnixMilli(), pcm)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v; want %v", err, context.Canceled)
+	}
+}
+
+func TestSender_StreamFramesAt_CloseDuringStreamReturnsErrClosed(t *testing.T) {
+	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("NewTo: %v", err)
+	}
+
+	frames := make(chan []int16, 16)
+	frames <- make([]int16, mediarpt.SamplesPerFrame)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.StreamFramesAt(ctx, time.Now().UnixMilli(), frames)
+	}()
+
+	_ = s.Close()
+	err = <-done
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("err=%v; want net.ErrClosed", err)
+	}
+}
+
+func TestSender_StreamFramesAt_PadsAndTrimsFrames(t *testing.T) {
+	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("NewTo: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	frames := make(chan []int16, 4)
+	frames <- make([]int16, mediarpt.SamplesPerFrame-10) // pad
+	frames <- make([]int16, mediarpt.SamplesPerFrame+10) // trim
+	close(frames)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := s.StreamFramesAt(ctx, time.Now().UnixMilli(), frames); err != nil {
+		t.Fatalf("StreamFramesAt: %v", err)
+	}
+
+	// Должны были уйти минимум 2 пакета (один на padded, один на trimmed).
+	buf := make([]byte, 2048)
+	for i := 0; i < 2; i++ {
+		_ = srv.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, _, err := srv.ReadFromUDP(buf); err != nil {
+			t.Fatalf("ReadFromUDP[%d]: %v", i, err)
+		}
 	}
 }
 
@@ -251,5 +381,141 @@ func TestStreamFramesAt_CancelDuringStreaming_ReturnsContextCanceled(t *testing.
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("timeout waiting for StreamFramesAt to return after cancel")
+	}
+}
+
+func TestStreamFramesAt_FramesNil_SendsSilenceUntilCancel(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	s, err := New("127.0.0.1", port)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	t0 := time.Now().Add(-time.Millisecond).UnixMilli()
+	go func() {
+		errCh <- s.StreamFramesAt(ctx, t0, nil)
+	}()
+
+	// Ensure we receive at least one packet (silence frame).
+	buf := make([]byte, 2048)
+	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+	var pkt pionrtp.Packet
+	if err := pkt.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if pkt.PayloadType != mediarpt.PayloadTypeG726() {
+		t.Fatalf("payload type=%d want %d", pkt.PayloadType, mediarpt.PayloadTypeG726())
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v want %v", err, context.Canceled)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timeout waiting for StreamFramesAt to return after cancel")
+	}
+}
+
+func TestNewFromConn_UsesWriteToUDP_WhenNotConnected(t *testing.T) {
+	recv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = recv.Close() }()
+	recvPort := recv.LocalAddr().(*net.UDPAddr).Port
+
+	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP(local): %v", err)
+	}
+	defer func() { _ = local.Close() }()
+
+	remote := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: recvPort}
+	s, err := NewFromConn(local, remote)
+	if err != nil {
+		t.Fatalf("NewFromConn: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	pcm := make([]int16, mediarpt.SamplesPerFrame)
+	t0 := time.Now().Add(-time.Millisecond).UnixMilli()
+	if err := s.StreamAt(context.Background(), t0, pcm); err != nil {
+		t.Fatalf("StreamAt: %v", err)
+	}
+
+	buf := make([]byte, 2048)
+	_ = recv.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	n, _, err := recv.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+	var pkt pionrtp.Packet
+	if err := pkt.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if pkt.PayloadType != mediarpt.PayloadTypeG726() {
+		t.Fatalf("payload type=%d want %d", pkt.PayloadType, mediarpt.PayloadTypeG726())
+	}
+}
+
+func TestStreamAt_CancelDuringStreaming_ReturnsContextCanceled(t *testing.T) {
+	recv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer func() { _ = recv.Close() }()
+
+	port := recv.LocalAddr().(*net.UDPAddr).Port
+	s, err := New("127.0.0.1", port)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	pcm := make([]int16, mediarpt.SamplesPerFrame*40)
+	t0 := time.Now().Add(-time.Millisecond).UnixMilli()
+	go func() {
+		errCh <- s.StreamAt(ctx, t0, pcm)
+	}()
+
+	// дождёмся первого RTP-пакета, чтобы отмена пришла "внутри" цикла отправки
+	buf := make([]byte, 2048)
+	_ = recv.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, _, err = recv.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("ReadFromUDP: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v want %v", err, context.Canceled)
+		}
+	case <-time.After(800 * time.Millisecond):
+		t.Fatalf("timeout waiting for StreamAt to return after cancel")
 	}
 }
