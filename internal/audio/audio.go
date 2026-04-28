@@ -1,3 +1,5 @@
+//go:build !windows
+
 package audio
 
 import (
@@ -8,39 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
-
-const (
-	SampleRate       = 8000
-	Channels         = 1
-	SamplesPerFrame  = 160
-	FrameDuration    = 20 * time.Millisecond
-	bytesPerSample   = 2
-	frameBytes       = SamplesPerFrame * bytesPerSample
-	defaultALSACard  = "default"
-	envALSADeviceKey = "ALSA_DEVICE"
-	envNoAudioKey    = "NO_AUDIO"
-)
-
-func Enabled() bool {
-	if strings.TrimSpace(os.Getenv(envNoAudioKey)) == "1" {
-		return false
-	}
-	dev := strings.TrimSpace(os.Getenv(envALSADeviceKey))
-	if dev == "" {
-		dev = defaultALSACard
-	}
-	return dev != "null"
-}
-
-func Device() string {
-	dev := strings.TrimSpace(os.Getenv(envALSADeviceKey))
-	if dev == "" {
-		return defaultALSACard
-	}
-	return dev
-}
 
 type Playback struct {
 	cmd   *exec.Cmd

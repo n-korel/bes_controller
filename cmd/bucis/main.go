@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -136,6 +137,30 @@ func main() {
 		v, ok := sipIDs.ip[sipID]
 		return v, ok
 	}
+	getSipIDByIP := func(besIP string) (string, bool) {
+		sipIDs.mu.Lock()
+		defer sipIDs.mu.Unlock()
+		for sipID, ip := range sipIDs.ip {
+			if ip == besIP {
+				return sipID, true
+			}
+		}
+		return "", false
+	}
+
+	enableUDPBroadcast := func(conn *net.UDPConn) error {
+		raw, err := conn.SyscallConn()
+		if err != nil {
+			return err
+		}
+		var serr error
+		if err := raw.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}
 
 	sendTo := func(ip string, port int, payload string) error {
 		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(ip, strconv.Itoa(port)))
@@ -147,6 +172,8 @@ func main() {
 			return err
 		}
 		defer func() { _ = conn.Close() }()
+		// Linux требует SO_BROADCAST для отправки на broadcast-адрес (иначе EACCES).
+		_ = enableUDPBroadcast(conn)
 		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 		_, err = conn.Write([]byte(payload))
 		return err
@@ -222,12 +249,12 @@ func main() {
 				}
 			}
 
-				ua, err := sipgo.NewUA(
-					sipgo.WithUserAgent(bucisUser),
-					sipgo.WithUserAgentHostname(sipDomain),
-				)
-				if err != nil {
-					logger.Warn("sip ua init failed", "err", err)
+			ua, err := sipgo.NewUA(
+				sipgo.WithUserAgent(bucisUser),
+				sipgo.WithUserAgentHostname(sipDomain),
+			)
+			if err != nil {
+				logger.Warn("sip ua init failed", "err", err)
 			} else {
 				remote := sip.Uri{Host: sipDomain, Port: sipPort}
 				network := remote.Headers.GetOr("transport", "udp")
@@ -322,7 +349,7 @@ func main() {
 							return
 						}
 						dialog, err := phone.Answer(ctx, sipgox.AnswerOptions{
-							Formats:  sdp.NewFormats(strconv.Itoa(int(rtp.PayloadTypeG726()))),
+							Formats: sdp.NewFormats(strconv.Itoa(int(rtp.PayloadTypeG726()))),
 						})
 						if err != nil {
 							if ctx.Err() != nil {
@@ -343,6 +370,8 @@ func main() {
 								"remote_port", raddr.Port,
 								"pt_g726", int(rtp.PayloadTypeG726()),
 								"rtp_port_range", strings.TrimSpace(os.Getenv("RTP_PORT_RANGE")),
+								"audio_enabled", audio.Enabled(),
+								"audio_device", audio.Device(),
 							)
 							dialog.MediaSession.Close()
 
@@ -352,17 +381,115 @@ func main() {
 								rx := receiver.New(lport)
 								if audio.Enabled() {
 									if pb, err := audio.StartPlayback(callCtx, audio.Device()); err == nil {
-										rx.SetPCMSink(func(pcm []int16) { _ = pb.WritePCM(pcm) })
+										// RTP приходит с джиттером, а aplay ожидает непрерывный поток.
+										// Делаем простую буферизацию + плейаут по таймеру 20ms: при отсутствии пакетов играем тишину.
+										playout := make(chan []int16, 64)
+										rx.SetPCMSink(func(pcm []int16) {
+											select {
+											case playout <- pcm:
+											default:
+											}
+										})
+										go func() {
+											t := time.NewTicker(rtp.FrameDuration)
+											defer t.Stop()
+											silence := make([]int16, rtp.SamplesPerFrame)
+											var last []int16
+											for {
+												select {
+												case <-callCtx.Done():
+													return
+												case <-t.C:
+													// Берём самый свежий кадр (сбрасывая накопившиеся), чтобы не раздувать задержку.
+													for {
+														select {
+														case f := <-playout:
+															last = f
+														default:
+															goto play
+														}
+													}
+												play:
+													if last == nil || len(last) != rtp.SamplesPerFrame {
+														_ = pb.WritePCM(silence)
+														continue
+													}
+													_ = pb.WritePCM(last)
+												}
+											}
+										}()
 										defer func() { _ = pb.Close() }()
+									} else {
+										logger.Warn("audio playback disabled", "err", err)
 									}
 								}
-								_ = rx.Start()
-								defer func() { _, _ = rx.Stop() }()
+								var startErr error
+								for attempt := 1; attempt <= 10; attempt++ {
+									startErr = rx.Start()
+									if startErr == nil {
+										break
+									}
+									if errors.Is(startErr, syscall.EADDRINUSE) {
+										time.Sleep(50 * time.Millisecond)
+										continue
+									}
+									break
+								}
+								if startErr != nil {
+									logger.Warn("rtp rx start failed", "local_port", lport, "err", startErr)
+									return
+								}
+								logger.Info("rtp rx started", "local_port", rx.MediaPort())
+								go func() {
+									t := time.NewTicker(2 * time.Second)
+									defer t.Stop()
+									for {
+										select {
+										case <-callCtx.Done():
+											return
+										case <-t.C:
+											s := rx.StatsSnapshot()
+											age := time.Since(s.LastPacket)
+											if s.Received == 0 {
+												logger.Info("rtp health", "received", 0, "last_packet_age", age.String())
+												continue
+											}
+											logger.Info("rtp health",
+												"received", s.Received,
+												"expected", s.Expected(),
+												"lost", s.Lost(),
+												"jitter_ms", s.JitterMs(),
+												"last_packet_age", age.String(),
+											)
+										}
+									}
+								}()
+								defer func() {
+									stats, err := rx.Stop()
+									if err != nil {
+										logger.Warn("rtp rx stop failed", "err", err)
+									}
+									if stats.Received > 0 {
+										logger.Info("rtp stats",
+											"received", stats.Received,
+											"expected", stats.Expected(),
+											"lost", stats.Lost(),
+											"jitter_ms", stats.JitterMs(),
+										)
+									}
+								}()
 
 								tx, err := sender.NewTo(raddr)
 								if err != nil {
+									if c := rx.Conn(); c != nil {
+										tx, err = sender.NewFromConn(c, raddr)
+									}
+								}
+								if err != nil {
+									logger.Warn("rtp tx create failed", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port, "err", err)
 									return
 								}
+								logger.Info("rtp tx started", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port)
 								defer func() { _ = tx.Close() }()
 
 								var frames <-chan []int16
@@ -370,6 +497,8 @@ func main() {
 									ch, err := audio.StartCaptureFrames(callCtx, audio.Device())
 									if err == nil {
 										frames = ch
+									} else {
+										logger.Warn("audio capture disabled", "err", err)
 									}
 								}
 								if frames == nil {
@@ -393,7 +522,9 @@ func main() {
 										}
 									}()
 								}
-								_ = tx.StreamFramesAt(callCtx, time.Now().UnixMilli(), frames)
+								if err := tx.StreamFramesAt(callCtx, time.Now().UnixMilli(), frames); err != nil && callCtx.Err() == nil {
+									logger.Warn("rtp tx stopped with error", "err", err)
+								}
 							}()
 						} else {
 							logger.Warn("rtp skipped: missing sdp addresses")
@@ -409,14 +540,35 @@ func main() {
 							}
 						}
 
-						if sipID == "" {
-							logger.Warn("ec_client_conversation skipped: cannot infer sip_id from SIP From header")
-							continue
+						var (
+							besIP string
+							ok    bool
+						)
+						if sipID != "" {
+							besIP, ok = getSipIDIP(sipID)
 						}
-
-						besIP, ok := getSipIDIP(sipID)
-						if !ok {
-							logger.Warn("ec_client_conversation skipped: unknown bes ip for sip_id", "sip_id", sipID)
+						if !ok && dialog != nil && dialog.InviteRequest != nil {
+							// From.User может быть произвольным (SIP_USER_BES задан вручную). Fallback: берём IP источника INVITE.
+							src := strings.TrimSpace(dialog.InviteRequest.Source())
+							host := src
+							if h, _, err := net.SplitHostPort(src); err == nil && h != "" {
+								host = h
+							}
+							if host != "" {
+								if s, found := getSipIDByIP(host); found {
+									sipID = s
+									besIP = host
+									ok = true
+								}
+							}
+						}
+						if !ok || sipID == "" || besIP == "" {
+							logger.Warn("ec_client_conversation skipped: cannot resolve sip_id/bes_ip", "sip_id", sipID)
+							select {
+							case <-ctx.Done():
+								return
+							case <-dialog.Context().Done():
+							}
 							continue
 						}
 
@@ -426,6 +578,13 @@ func main() {
 							continue
 						}
 						logger.Info("ec_client_conversation sent", "dst", besIP, "sip_id", sipID)
+
+						// Не принимаем следующий INVITE, пока не завершён текущий диалог (иначе копятся RTP-горутины).
+						select {
+						case <-ctx.Done():
+							return
+						case <-dialog.Context().Done():
+						}
 					}
 				}()
 			}

@@ -274,6 +274,9 @@ func (p *Phone) Register(ctx context.Context, recipient sip.Uri, opts RegisterOp
 		sipgo.WithClientPort(lport),
 		sipgo.WithClientNAT(), // add rport support
 	)
+	if err != nil {
+		return err
+	}
 	defer client.Close()
 
 	contactHdr := sip.ContactHeader{
@@ -293,7 +296,8 @@ func (p *Phone) Register(ctx context.Context, recipient sip.Uri, opts RegisterOp
 	}
 
 	defer func() {
-		ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		err := t.Unregister(ctx)
 		if err != nil {
 			log.Error().Err(err).Msg("Fail to unregister")
@@ -373,7 +377,8 @@ type DialogReferState struct {
 // return DialResponseError in case non 200 responses
 func (p *Phone) Dial(dialCtx context.Context, recipient sip.Uri, o DialOptions) (*DialogClientSession, error) {
 	log := p.getLoggerCtx(dialCtx, "Dial")
-	ctx, _ := context.WithCancel(dialCtx)
+	ctx, cancel := context.WithCancel(dialCtx)
+	defer cancel()
 
 	network := "udp"
 	if recipient.UriParams != nil {
@@ -476,8 +481,7 @@ func (p *Phone) Dial(dialCtx context.Context, recipient sip.Uri, o DialOptions) 
 					return err
 				}
 			}
-			rtpPort := pickRTPPort(rtpIp)
-			msess, err := media.NewMediaSession(&net.UDPAddr{IP: rtpIp, Port: rtpPort})
+			msess, err := newRTPMediaSession(rtpIp)
 			if err != nil {
 				return err
 			}
@@ -592,8 +596,7 @@ func (p *Phone) Dial(dialCtx context.Context, recipient sip.Uri, o DialOptions) 
 			return nil, err
 		}
 	}
-	rtpPort := pickRTPPort(rtpIp)
-	msess, err := media.NewMediaSession(&net.UDPAddr{IP: rtpIp, Port: rtpPort})
+	msess, err := newRTPMediaSession(rtpIp)
 	if err != nil {
 		return nil, err
 	}
@@ -730,7 +733,9 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 	log := p.getLoggerCtx(ansCtx, "Answer")
 	ringtime := opts.Ringtime
 
-	waitDialog := make(chan *DialogServerSession)
+	// Буфер 1: диалог можно отдать вызывающему коду сразу после 200 OK,
+	// не дожидаясь ACK, чтобы он успел стартовать RTP (в симуляторе это важно).
+	waitDialog := make(chan *DialogServerSession, 1)
 	var d *DialogServerSession
 
 	server, err := sipgo.NewServer(p.UA)
@@ -799,7 +804,8 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 
 		origStopAnswer := stopAnswer
 		stopAnswer = sync.OnceFunc(func() {
-			ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 			err := regTr.Unregister(ctx)
 			if err != nil {
 				log.Error().Err(err).Msg("Fail to unregister")
@@ -1012,8 +1018,7 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 				}
 			}
 
-			rtpPort := pickRTPPort(ip)
-			msess, err := media.NewMediaSession(&net.UDPAddr{IP: ip, Port: rtpPort})
+			msess, err := newRTPMediaSession(ip)
 			if err != nil {
 				return err
 			}
@@ -1051,6 +1056,12 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 				return fmt.Errorf("fail to send 200 response: %w", err)
 			}
 			p.logSipResponse(&log, res)
+
+			// Отдаём диалог сразу после 200 OK. ACK всё равно обработается в OnAck.
+			select {
+			case waitDialog <- d:
+			default:
+			}
 			return nil
 		}()
 
@@ -1063,13 +1074,9 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 	})
 
 	server.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
+		// Диалог может уже быть отдан вызывающему коду сразу после 200 OK.
 		if d == nil {
-			if chal != nil {
-				return
-			}
-
-			exitError(fmt.Errorf("received ack but no dialog"))
-			stopAnswer()
+			return
 		}
 
 		if err := ds.ReadAck(req, tx); err != nil {
@@ -1078,10 +1085,10 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 			return
 		}
 
+		// Если диалог уже был отправлен после 200 OK, повторно не блокируемся.
 		select {
 		case waitDialog <- d:
-			d = nil
-		case <-ctx.Done():
+		default:
 		}
 	})
 

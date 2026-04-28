@@ -1,17 +1,17 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
-	"sync"
-	"sync/atomic"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,9 +30,6 @@ import (
 )
 
 func main() {
-	var press bool
-
-	flag.BoolVar(&press, "press", false, "send ec_client_query immediately and exit when answer received (or timeout)")
 	flag.Parse()
 
 	log.Init(os.Getenv("LOG_FORMAT"))
@@ -72,10 +69,10 @@ func main() {
 
 	conversations := make(chan string, 16)
 	var (
-		stateUnregistered       uint32 = 0
-		stateRegistrationIdle   uint32 = 1
-		stateRegistrationQuery  uint32 = 2
-		stateInCall             uint32 = 3
+		stateUnregistered      uint32 = 0
+		stateRegistrationIdle  uint32 = 1
+		stateRegistrationQuery uint32 = 2
+		stateInCall            uint32 = 3
 	)
 	var state atomic.Uint32
 	state.Store(stateUnregistered)
@@ -196,50 +193,6 @@ func main() {
 		return "", "", fmt.Errorf("no ec_client_answer after %d retries", cfg.EC.ClientQueryMaxRetries)
 	}
 
-	if press {
-		if state.Load() == stateUnregistered {
-			waitTimeout := cfg.EC.ClientResetInterval + cfg.EC.KeepAliveInterval
-			if waitTimeout <= 0 {
-				waitTimeout = 5 * time.Second
-			}
-			logger.Info("waiting for ec_client_reset before press", "timeout", waitTimeout.String())
-			timeout := time.NewTimer(waitTimeout)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			for state.Load() == stateUnregistered {
-				select {
-				case <-ctx.Done():
-					timeout.Stop()
-					ticker.Stop()
-					fmt.Fprintln(os.Stderr, ctx.Err())
-					os.Exit(1)
-				case <-timeout.C:
-					ticker.Stop()
-					fmt.Fprintln(os.Stderr, "ignored: not registered yet (wait for ec_client_reset)")
-					os.Exit(1)
-				case <-ticker.C:
-				}
-			}
-			timeout.Stop()
-			ticker.Stop()
-		}
-		if state.Load() != stateRegistrationIdle {
-			fmt.Fprintln(os.Stderr, "ignored: busy (already querying or in call)")
-			os.Exit(1)
-		}
-		sipID, newIP, err := doPress()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		state.Store(stateInCall)
-		if err := runSIP(ctx, logger, cfg, newIP, sipID, conversations); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		state.Store(stateRegistrationIdle)
-		return
-	}
-
 	// KeepAlive heartbeat: log if we stop receiving keepalives.
 	{
 		timeout := cfg.EC.KeepAliveTimeout
@@ -278,91 +231,35 @@ func main() {
 		}
 	}
 
-	lines := make(chan string, 1)
-	go func() {
-		defer close(lines)
-		sc := bufio.NewScanner(os.Stdin)
-		for sc.Scan() {
-			lines <- sc.Text()
-		}
-	}()
+	// Раньше запуск ждал команду `press` из stdin. Теперь `bes` сразу инициирует ClientQuery и SIP звонок.
+	state.Store(stateRegistrationIdle)
 
-	for {
-		_, _ = fmt.Fprint(os.Stdout, "> ")
-		select {
-		case <-ctx.Done():
-			_ = lconn.Close()
-			done := make(chan struct{})
-			go func() { defer close(done); wg.Wait() }()
+	sipID, newIP, err := doPress()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		_ = lconn.Close()
+		os.Exit(1)
+	}
+	state.Store(stateInCall)
+	if err := runSIP(ctx, logger, cfg, newIP, sipID, conversations); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		stop()
+		_ = lconn.Close()
+		os.Exit(1)
+	}
+	state.Store(stateRegistrationIdle)
 
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			select {
-			case <-done:
-			case <-shutdownCtx.Done():
-				logger.Warn("shutdown timeout exceeded")
-			}
-			return
-		case raw, ok := <-lines:
-			if !ok {
-				_ = lconn.Close()
-				done := make(chan struct{})
-				go func() { defer close(done); wg.Wait() }()
-
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				select {
-				case <-done:
-				case <-shutdownCtx.Done():
-					logger.Warn("shutdown timeout exceeded")
-				}
-				return
-			}
-			line := strings.TrimSpace(raw)
-			switch line {
-			case "":
-				continue
-			case "press":
-				if state.Load() == stateUnregistered {
-					logger.Warn("press ignored: not registered yet (wait for ec_client_reset)")
-					continue
-				}
-				if state.Load() == stateInCall {
-					logger.Warn("press ignored: call already in progress")
-					continue
-				}
-				if state.Load() == stateRegistrationQuery {
-					logger.Warn("press ignored: already querying")
-					continue
-				}
-				sipID, newIP, err := doPress()
-				if err != nil {
-					logger.Warn("press failed", "err", err)
-					continue
-				}
-				state.Store(stateInCall)
-				if err := runSIP(ctx, logger, cfg, newIP, sipID, conversations); err != nil {
-					logger.Warn("sip failed", "err", err)
-				}
-				state.Store(stateRegistrationIdle)
-			case "quit", "exit":
-				stop()
-				_ = lconn.Close()
-				done := make(chan struct{})
-				go func() { defer close(done); wg.Wait() }()
-
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				select {
-				case <-done:
-				case <-shutdownCtx.Done():
-					logger.Warn("shutdown timeout exceeded")
-				}
-				return
-			default:
-				logger.Info("unknown command", "cmd", line)
-			}
-		}
+	// graceful shutdown of background goroutines
+	stop()
+	_ = lconn.Close()
+	done := make(chan struct{})
+	go func() { defer close(done); wg.Wait() }()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		logger.Warn("shutdown timeout exceeded")
 	}
 }
 
@@ -455,6 +352,8 @@ func runSIP(ctx context.Context, logger interface {
 			"remote_port", raddr.Port,
 			"pt_g726", int(rtp.PayloadTypeG726()),
 			"rtp_port_range", strings.TrimSpace(os.Getenv("RTP_PORT_RANGE")),
+			"audio_enabled", audio.Enabled(),
+			"audio_device", audio.Device(),
 		)
 		dialog.MediaSession.Close() // free port; we use our own RTP sockets
 
@@ -464,19 +363,105 @@ func runSIP(ctx context.Context, logger interface {
 		rx := receiver.New(lport)
 		if audio.Enabled() {
 			if pb, err := audio.StartPlayback(rtpCtx, audio.Device()); err == nil {
-				rx.SetPCMSink(func(pcm []int16) { _ = pb.WritePCM(pcm) })
+				// RTP приходит с джиттером, а aplay ожидает непрерывный поток.
+				// Делаем простую буферизацию + плейаут по таймеру 20ms: при отсутствии пакетов играем тишину.
+				playout := make(chan []int16, 64)
+				rx.SetPCMSink(func(pcm []int16) {
+					select {
+					case playout <- pcm:
+					default:
+					}
+				})
+				go func() {
+					t := time.NewTicker(rtp.FrameDuration)
+					defer t.Stop()
+					silence := make([]int16, rtp.SamplesPerFrame)
+					var last []int16
+					for {
+						select {
+						case <-rtpCtx.Done():
+							return
+						case <-t.C:
+							// Берём самый свежий кадр (сбрасывая накопившиеся), чтобы не раздувать задержку.
+							for {
+								select {
+								case f := <-playout:
+									last = f
+								default:
+									goto play
+								}
+							}
+						play:
+							if last == nil || len(last) != rtp.SamplesPerFrame {
+								_ = pb.WritePCM(silence)
+								continue
+							}
+							_ = pb.WritePCM(last)
+						}
+					}
+				}()
 				defer func() { _ = pb.Close() }()
+			} else {
+				logger.Warn("audio playback disabled", "err", err)
 			}
 		}
-		_ = rx.Start()
+		var startErr error
+		for attempt := 1; attempt <= 10; attempt++ {
+			startErr = rx.Start()
+			if startErr == nil {
+				break
+			}
+			if errors.Is(startErr, syscall.EADDRINUSE) {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			break
+		}
+		if startErr != nil {
+			logger.Warn("rtp rx start failed", "local_port", lport, "err", startErr)
+			return startErr
+		}
+		logger.Info("rtp rx started", "local_port", rx.MediaPort())
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-rtpCtx.Done():
+					return
+				case <-t.C:
+					s := rx.StatsSnapshot()
+					age := time.Since(s.LastPacket)
+					if s.Received == 0 {
+						logger.Info("rtp health", "received", 0, "last_packet_age", age.String())
+						continue
+					}
+					logger.Info("rtp health",
+						"received", s.Received,
+						"expected", s.Expected(),
+						"lost", s.Lost(),
+						"jitter_ms", s.JitterMs(),
+						"last_packet_age", age.String(),
+					)
+				}
+			}
+		}()
 
 		tx, err := sender.NewTo(raddr)
+		if err != nil {
+			if c := rx.Conn(); c != nil {
+				tx, err = sender.NewFromConn(c, raddr)
+			}
+		}
 		if err == nil {
+			logger.Info("rtp tx started", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port)
 			var frames <-chan []int16
 			if audio.Enabled() {
 				ch, err := audio.StartCaptureFrames(rtpCtx, audio.Device())
 				if err == nil {
 					frames = ch
+				} else {
+					logger.Warn("audio capture disabled", "err", err)
 				}
 			}
 			if frames == nil {
@@ -501,11 +486,28 @@ func runSIP(ctx context.Context, logger interface {
 				}()
 			}
 			go func() {
-				_ = tx.StreamFramesAt(rtpCtx, time.Now().UnixMilli(), frames)
+				if err := tx.StreamFramesAt(rtpCtx, time.Now().UnixMilli(), frames); err != nil && rtpCtx.Err() == nil {
+					logger.Warn("rtp tx stopped with error", "err", err)
+				}
 			}()
 			defer func() { _ = tx.Close() }()
+		} else {
+			logger.Warn("rtp tx create failed", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port, "err", err)
 		}
-		defer func() { _, _ = rx.Stop() }()
+		defer func() {
+			stats, err := rx.Stop()
+			if err != nil {
+				logger.Warn("rtp rx stop failed", "err", err)
+			}
+			if stats.Received > 0 {
+				logger.Info("rtp stats",
+					"received", stats.Received,
+					"expected", stats.Expected(),
+					"lost", stats.Lost(),
+					"jitter_ms", stats.JitterMs(),
+				)
+			}
+		}()
 	} else {
 		logger.Warn("rtp skipped: missing sdp addresses")
 	}

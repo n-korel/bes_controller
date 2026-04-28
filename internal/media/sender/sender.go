@@ -15,6 +15,7 @@ import (
 type Sender struct {
 	conn   *net.UDPConn
 	addr   *net.UDPAddr
+	owns   bool
 	closed atomic.Bool
 }
 
@@ -27,7 +28,7 @@ func New(broadcastAddr string, mediaPort int) (*Sender, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Sender{conn: conn, addr: addr}, nil
+	return &Sender{conn: conn, addr: addr, owns: true}, nil
 }
 
 func NewTo(addr *net.UDPAddr) (*Sender, error) {
@@ -38,12 +39,33 @@ func NewTo(addr *net.UDPAddr) (*Sender, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Sender{conn: conn, addr: addr}, nil
+	return &Sender{conn: conn, addr: addr, owns: true}, nil
+}
+
+func NewFromConn(conn *net.UDPConn, addr *net.UDPAddr) (*Sender, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("nil conn")
+	}
+	if addr == nil {
+		return nil, fmt.Errorf("nil remote addr")
+	}
+	return &Sender{conn: conn, addr: addr, owns: false}, nil
 }
 
 func (s *Sender) Close() error {
 	s.closed.Store(true)
+	if !s.owns {
+		return nil
+	}
 	return s.conn.Close()
+}
+
+func (s *Sender) write(raw []byte) (int, error) {
+	// Если conn создан через DialUDP, он "connected" и WriteTo* на Linux вернёт ошибку.
+	if s.conn.RemoteAddr() != nil {
+		return s.conn.Write(raw)
+	}
+	return s.conn.WriteToUDP(raw, s.addr)
 }
 
 func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
@@ -107,7 +129,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		if s.closed.Load() {
 			return net.ErrClosed
 		}
-		if _, err := s.conn.Write(raw); err != nil {
+		if _, err := s.write(raw); err != nil {
 			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
 				return ctx.Err()
 			}
@@ -138,6 +160,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 	seq := mediarpt.RandomSequence()
 	ssrc := mediarpt.RandomSSRC()
 	rtpTS := uint32(0)
+	silence := make([]int16, mediarpt.SamplesPerFrame)
 
 	frameTime := start
 	for {
@@ -159,14 +182,21 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 			}
 		}
 
-		var frame []int16
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case frame = <-frames:
-		}
-		if frame == nil {
-			return nil
+		frame := silence
+		if frames != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case f, ok := <-frames:
+				if !ok {
+					return nil
+				}
+				if f == nil {
+					return nil
+				}
+				frame = f
+			default:
+			}
 		}
 
 		if len(frame) < mediarpt.SamplesPerFrame {
@@ -189,7 +219,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		if s.closed.Load() {
 			return net.ErrClosed
 		}
-		if _, err := s.conn.Write(raw); err != nil {
+		if _, err := s.write(raw); err != nil {
 			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
 				return ctx.Err()
 			}

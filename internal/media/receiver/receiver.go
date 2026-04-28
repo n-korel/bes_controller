@@ -162,6 +162,12 @@ func (r *Receiver) MediaPort() int {
 	return r.mediaPort
 }
 
+func (r *Receiver) Conn() *net.UDPConn {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	return r.conn
+}
+
 func (r *Receiver) Stop() (SessionStats, error) {
 	r.mu.Lock()
 	if r.doneCh == nil {
@@ -208,6 +214,12 @@ func (r *Receiver) LastPacketAt() time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stats.LastPacket
+}
+
+func (r *Receiver) StatsSnapshot() SessionStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stats
 }
 
 func (r *Receiver) runRTP(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- struct{}) {

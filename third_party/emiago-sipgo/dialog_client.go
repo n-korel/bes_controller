@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -491,7 +492,11 @@ func (s *DialogClientSession) isEarlyDialog() bool {
 func newAckRequestUAC(inviteRequest *sip.Request, inviteResponse *sip.Response, body []byte) *sip.Request {
 	Recipient := &inviteRequest.Recipient
 	if contact := inviteResponse.Contact(); contact != nil {
-		Recipient = &contact.Address
+		// Some proxies/UAs may send an unspecified Contact host (0.0.0.0).
+		// In that case, ignore Contact and fallback to original recipient.
+		if ip := net.ParseIP(contact.Address.Host); ip == nil || !ip.IsUnspecified() {
+			Recipient = &contact.Address
+		}
 	}
 	ackRequest := sip.NewRequest(
 		sip.ACK,
@@ -543,6 +548,12 @@ func newAckRequestUAC(inviteRequest *sip.Request, inviteResponse *sip.Response, 
 	ackRequest.SetTransport(inviteRequest.Transport())
 	ackRequest.SetSource(inviteRequest.Source())
 	ackRequest.Laddr = inviteRequest.Laddr
+
+	// Ensure we send ACK to the same network destination as the 2xx response source.
+	// This makes ACK resilient to invalid/unroutable Contact headers (e.g. 0.0.0.0).
+	if src := inviteResponse.Source(); src != "" {
+		ackRequest.SetDestination(src)
+	}
 	return ackRequest
 }
 

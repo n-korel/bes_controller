@@ -222,3 +222,65 @@ func TestReceiver_RTP_IgnoresWrongPayloadTypeAndBadPackets(t *testing.T) {
 	}
 }
 
+func TestSessionStats_ExpectedLostEdgeCases(t *testing.T) {
+	var s SessionStats
+	if got := s.Expected(); got != 0 {
+		t.Fatalf("Expected()=%d want 0", got)
+	}
+	if got := s.Lost(); got != 0 {
+		t.Fatalf("Lost()=%d want 0", got)
+	}
+
+	s = SessionStats{FirstSeq: 10, MaxSeq: 12, Cycles: 0, Received: 3}
+	if got, want := s.Expected(), uint32(3); got != want {
+		t.Fatalf("Expected()=%d want %d", got, want)
+	}
+	if got := s.Lost(); got != 0 {
+		t.Fatalf("Lost()=%d want 0", got)
+	}
+
+	s = SessionStats{FirstSeq: 10, MaxSeq: 12, Cycles: 0, Received: 2}
+	if got, want := s.Expected(), uint32(3); got != want {
+		t.Fatalf("Expected()=%d want %d", got, want)
+	}
+	if got, want := s.Lost(), uint32(1); got != want {
+		t.Fatalf("Lost()=%d want %d", got, want)
+	}
+}
+
+func TestSessionStats_JitterMs(t *testing.T) {
+	s := SessionStats{Jitter: 80}
+	if got, want := s.JitterMs(), 10.0; got != want {
+		t.Fatalf("JitterMs()=%v want %v", got, want)
+	}
+}
+
+func TestIsNewerTimestamp_WrapAround(t *testing.T) {
+	// b is near uint32 max, a wrapped and is slightly "newer" in RTP terms.
+	var b uint32 = 0xfffffff0
+	var a uint32 = 0x00000010
+	if !isNewerTimestamp(a, b) {
+		t.Fatalf("expected a newer than b under wrap-around")
+	}
+	if isNewerTimestamp(b, a) {
+		t.Fatalf("expected b not newer than a under wrap-around")
+	}
+}
+
+func TestWrapSequence_DoesNotIncreaseCyclesIfGapTooLarge(t *testing.T) {
+	r := &Receiver{playing: true}
+
+	r.updateStats(60000, 1000)
+	r.updateStats(65000, 2000)
+
+	// seq wrapped, timestamp is newer, but the forward gap is too large to accept wrap.
+	r.updateStats(20000, 3000)
+
+	if got, want := r.stats.Cycles, uint32(0); got != want {
+		t.Fatalf("Cycles=%d want %d", got, want)
+	}
+	if got, want := r.stats.MaxSeq, uint16(65000); got != want {
+		t.Fatalf("MaxSeq=%d want %d", got, want)
+	}
+}
+

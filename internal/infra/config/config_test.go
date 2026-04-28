@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func resetDotEnv(t *testing.T) {
@@ -96,6 +97,38 @@ func TestParseBucis_RequiredMissing(t *testing.T) {
 func TestParseBes_InvalidBroadcastAddr(t *testing.T) {
 	resetDotEnv(t)
 	t.Setenv("EC_BES_BROADCAST_ADDR", "not-an-ip")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_KeepAliveTimeout_DefaultsTo3xInterval(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "2s")
+	t.Setenv("EC_KEEPALIVE_TIMEOUT", "")
+
+	cfg, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+	if got, want := cfg.EC.KeepAliveTimeout, 6*time.Second; got != want {
+		t.Fatalf("KeepAliveTimeout=%s want %s", got, want)
+	}
+}
+
+func TestParseBes_MaxRetriesMustBePositive(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_CLIENT_QUERY_MAX_RETRIES", "0")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_InvalidDurationFails(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "nope")
 	_, err := ParseBes()
 	if err == nil {
 		t.Fatal("expected error")

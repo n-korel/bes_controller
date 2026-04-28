@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/emiago/media"
 	"github.com/emiago/sipgo/sip"
 )
 
@@ -111,18 +112,16 @@ func parsePortRange(raw string) (min int, max int, ok bool) {
 	return a, b, true
 }
 
-func pickRTPPort(ip net.IP) int {
+func newRTPMediaSession(ip net.IP) (*media.MediaSession, error) {
 	min, max, ok := parsePortRange(os.Getenv("RTP_PORT_RANGE"))
 	if !ok {
 		min, max = 5003, 5009
 	}
 	for p := min; p <= max; p++ {
-		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip, Port: p})
-		if err != nil {
-			continue
+		msess, err := media.NewMediaSession(&net.UDPAddr{IP: ip, Port: p})
+		if err == nil {
+			return msess, nil
 		}
-		_ = c.Close()
-		return p
 	}
-	return 0
+	return nil, fmt.Errorf("failed to allocate RTP port in range %d-%d", min, max)
 }

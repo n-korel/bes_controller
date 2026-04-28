@@ -115,3 +115,56 @@ func TestFormatters(t *testing.T) {
 		t.Fatalf("FormatClientConversation: got %q want %q", got, want)
 	}
 }
+
+func TestFormatParse_RoundTrip(t *testing.T) {
+	{
+		line := FormatClientReset(" 1.2.3.4 ", " 5.6.7.8 ")
+		reset, query, answer, keepalive, conv, ok := Parse([]byte(line))
+		if !ok || query != nil || answer != nil || keepalive != nil || conv != nil {
+			t.Fatalf("Parse(reset) ok=%v reset=%v query=%v answer=%v keepalive=%v conv=%v", ok, reset, query, answer, keepalive, conv)
+		}
+		if reset.IPHead1 != "1.2.3.4" || reset.IPHead2 != "5.6.7.8" {
+			t.Fatalf("reset=%+v", *reset)
+		}
+	}
+	{
+		line := FormatClientQuery(" AA:BB:CC ")
+		reset, query, answer, keepalive, conv, ok := Parse([]byte(line))
+		if !ok || reset != nil || answer != nil || keepalive != nil || conv != nil {
+			t.Fatalf("Parse(query) ok=%v reset=%v query=%v answer=%v keepalive=%v conv=%v", ok, reset, query, answer, keepalive, conv)
+		}
+		if query.MAC != "AA:BB:CC" {
+			t.Fatalf("query=%+v", *query)
+		}
+	}
+	{
+		line := FormatClientAnswer(" 1.2.3.4 ", " 123 ")
+		reset, query, answer, keepalive, conv, ok := Parse([]byte(line))
+		if !ok || reset != nil || query != nil || keepalive != nil || conv != nil {
+			t.Fatalf("Parse(answer) ok=%v reset=%v query=%v answer=%v keepalive=%v conv=%v", ok, reset, query, answer, keepalive, conv)
+		}
+		if answer.NewIP != "1.2.3.4" || answer.SipID != "123" {
+			t.Fatalf("answer=%+v", *answer)
+		}
+	}
+	{
+		line := FormatKeepAlive(" 1.2.3.4 ", " 0 ")
+		reset, query, answer, keepalive, conv, ok := Parse([]byte(line))
+		if !ok || reset != nil || query != nil || answer != nil || conv != nil {
+			t.Fatalf("Parse(keepalive) ok=%v reset=%v query=%v answer=%v keepalive=%v conv=%v", ok, reset, query, answer, keepalive, conv)
+		}
+		if keepalive.OpenSIPSIP != "1.2.3.4" || keepalive.Status != "0" {
+			t.Fatalf("keepalive=%+v", *keepalive)
+		}
+	}
+	{
+		line := FormatClientConversation(" 123 ")
+		reset, query, answer, keepalive, conv, ok := Parse([]byte(line))
+		if !ok || reset != nil || query != nil || answer != nil || keepalive != nil {
+			t.Fatalf("Parse(conv) ok=%v reset=%v query=%v answer=%v keepalive=%v conv=%v", ok, reset, query, answer, keepalive, conv)
+		}
+		if conv.SipID != "123" {
+			t.Fatalf("conv=%+v", *conv)
+		}
+	}
+}
