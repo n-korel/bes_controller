@@ -10,9 +10,14 @@ import (
 
 var loadDotEnvOnce sync.Once
 var loadDotEnvErr error
+var loadedDotEnvKeys []string
 
 func loadDotEnv() error {
 	loadDotEnvOnce.Do(func() {
+		// В тестах может понадобиться повторное применение содержимого .env,
+		// поэтому запоминаем ключи, которые мы реально выставили.
+		loadedDotEnvKeys = nil
+
 		f, err := os.Open(".env")
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -55,6 +60,7 @@ func loadDotEnv() error {
 				loadDotEnvErr = fmt.Errorf("set env %q: %w", k, err)
 				return
 			}
+			loadedDotEnvKeys = append(loadedDotEnvKeys, k)
 		}
 		if err := sc.Err(); err != nil {
 			loadDotEnvErr = fmt.Errorf("scan .env: %w", err)

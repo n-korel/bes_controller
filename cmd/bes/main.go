@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -18,9 +18,8 @@ import (
 	"bucis-bes_simulator/internal/audio"
 	"bucis-bes_simulator/internal/control/protocol"
 	"bucis-bes_simulator/internal/infra/config"
-	"bucis-bes_simulator/internal/media/receiver"
 	"bucis-bes_simulator/internal/media/rtp"
-	"bucis-bes_simulator/internal/media/sender"
+	"bucis-bes_simulator/internal/media/rtpsession"
 	"bucis-bes_simulator/pkg/log"
 
 	"github.com/emiago/media/sdp"
@@ -74,6 +73,9 @@ func main() {
 
 	answers := make(chan answerEvent, 8)
 
+	resetCh := make(chan struct{}, 4)
+	pressCh := make(chan struct{}, 1)
+
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -103,7 +105,10 @@ func main() {
 			}
 			if reset != nil {
 				logger.Info("ec_client_reset received", "head1", reset.IPHead1, "head2", reset.IPHead2, "from", raddr.IP.String())
-				onClientReset(&state)
+				select {
+				case resetCh <- struct{}{}:
+				default:
+				}
 			}
 			if keepalive != nil {
 				logger.Debug("ec_server_keepalive received", "opensips_ip", keepalive.OpenSIPSIP, "status", keepalive.Status, "from", raddr.IP.String())
@@ -170,31 +175,46 @@ func main() {
 		}
 	}
 
-	// Раньше запуск ждал команду `press` из stdin. Теперь `bes` сразу инициирует ClientQuery и SIP звонок.
-	state.Store(stateRegistrationIdle)
+	// Reader for external "press" command (one line: "press").
+	// This is the trigger for REGISTRATION_IDLE -> REGISTRATION_QUERYING.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line != "press" {
+				continue
+			}
+			select {
+			case pressCh <- struct{}{}:
+			default:
+				// "press" during active querying/call is ignored (buffer is full).
+			}
+		}
+	}()
 
-	state.Store(stateRegistrationQuery)
-	sipID, newIP, err := doPress(ctx, logger, cfg, sendQueryOnce, answers)
-	if state.Load() == stateRegistrationQuery {
-		state.Store(stateRegistrationIdle)
+	fsm := besFSM{
+		cfg:              cfg,
+		logger:          logger,
+		state:           &state,
+		sendQueryOnce:  sendQueryOnce,
+		runSIP:          runSIP,
+		resetCh:         resetCh,
+		pressCh:         pressCh,
+		answers:         answers,
+		autoPressAfterFirstReset: true,
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		_ = lconn.Close()
-		os.Exit(1)
-	}
-	state.Store(stateInCall)
-	if err := runSIP(ctx, logger, cfg, newIP, sipID, conversations); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		stop()
-		_ = lconn.Close()
-		os.Exit(1)
-	}
-	state.Store(stateRegistrationIdle)
+
+	_ = fsm.Run(ctx, conversations)
 
 	// graceful shutdown of background goroutines
 	stop()
 	_ = lconn.Close()
+
+	// Unblock stdin scanner goroutine.
+	_ = os.Stdin.Close()
+
 	done := make(chan struct{})
 	go func() { defer close(done); wg.Wait() }()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -226,10 +246,15 @@ func firstHardwareMAC() string {
 	return ""
 }
 
-func runSIP(ctx context.Context, logger interface {
-	Info(string, ...any)
-	Warn(string, ...any)
-}, cfg config.Bes, domain string, sipID string, conversations <-chan string) error {
+func runSIP(
+	ctx context.Context,
+	logger besLogger,
+	cfg config.Bes,
+	domain string,
+	sipID string,
+	conversations <-chan string,
+	dialEstablished chan<- struct{},
+) error {
 	if v := strings.TrimSpace(os.Getenv("SIP_DOMAIN")); v != "" {
 		domain = v
 	}
@@ -285,6 +310,12 @@ func runSIP(ctx context.Context, logger interface {
 	}
 	defer func() { _ = dialog.Close() }()
 	logger.Info("sip call established", "to", bucisUser, "domain", domain)
+	if dialEstablished != nil {
+		select {
+		case dialEstablished <- struct{}{}:
+		default:
+		}
+	}
 
 	if dialog.MediaSession != nil && dialog.Laddr != nil && dialog.Raddr != nil {
 		lport := dialog.Laddr.Port
@@ -302,155 +333,14 @@ func runSIP(ctx context.Context, logger interface {
 
 		rtpCtx, cancelRTP := context.WithCancel(ctx)
 		defer cancelRTP()
-
-		rx := receiver.New(lport)
-		if audio.Enabled() {
-			if pb, err := audio.StartPlayback(rtpCtx, audio.Device()); err == nil {
-				// RTP приходит с джиттером, а aplay ожидает непрерывный поток.
-				// Делаем простую буферизацию + плейаут по таймеру 20ms: при отсутствии пакетов играем тишину.
-				playout := make(chan []int16, 64)
-				rx.SetPCMSink(func(pcm []int16) {
-					select {
-					case playout <- pcm:
-					default:
-					}
-				})
-				go func() {
-					t := time.NewTicker(rtp.FrameDuration)
-					defer t.Stop()
-					silence := make([]int16, rtp.SamplesPerFrame)
-					var last []int16
-					for {
-						select {
-						case <-rtpCtx.Done():
-							return
-						case <-t.C:
-							// Берём самый свежий кадр (сбрасывая накопившиеся), чтобы не раздувать задержку.
-							for {
-								select {
-								case f := <-playout:
-									last = f
-								default:
-									goto play
-								}
-							}
-						play:
-							if last == nil || len(last) != rtp.SamplesPerFrame {
-								_ = pb.WritePCM(silence)
-								continue
-							}
-							_ = pb.WritePCM(last)
-						}
-					}
-				}()
-				defer func() { _ = pb.Close() }()
-			} else {
-				logger.Warn("audio playback disabled", "err", err)
-			}
+		cleanup, _, rtpErr := rtpsession.Start(rtpCtx, logger, lport, raddr)
+		if cleanup != nil {
+			defer cleanup()
 		}
-		var startErr error
-		for attempt := 1; attempt <= 10; attempt++ {
-			startErr = rx.Start()
-			if startErr == nil {
-				break
-			}
-			if errors.Is(startErr, syscall.EADDRINUSE) {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			break
+		// Ошибка RX — критическая (как раньше), ошибка TX — уже залогирована и RX продолжаем.
+		if rtpErr != nil && cleanup == nil {
+			return rtpErr
 		}
-		if startErr != nil {
-			logger.Warn("rtp rx start failed", "local_port", lport, "err", startErr)
-			return startErr
-		}
-		logger.Info("rtp rx started", "local_port", rx.MediaPort())
-		go func() {
-			t := time.NewTicker(2 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-rtpCtx.Done():
-					return
-				case <-t.C:
-					s := rx.StatsSnapshot()
-					age := time.Since(s.LastPacket)
-					if s.Received == 0 {
-						logger.Info("rtp health", "received", 0, "last_packet_age", age.String())
-						continue
-					}
-					logger.Info("rtp health",
-						"received", s.Received,
-						"expected", s.Expected(),
-						"lost", s.Lost(),
-						"jitter_ms", s.JitterMs(),
-						"last_packet_age", age.String(),
-					)
-				}
-			}
-		}()
-
-		tx, err := sender.NewTo(raddr)
-		if err != nil {
-			if c := rx.Conn(); c != nil {
-				tx, err = sender.NewFromConn(c, raddr)
-			}
-		}
-		if err == nil {
-			logger.Info("rtp tx started", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port)
-			var frames <-chan []int16
-			if audio.Enabled() {
-				ch, err := audio.StartCaptureFrames(rtpCtx, audio.Device())
-				if err == nil {
-					frames = ch
-				} else {
-					logger.Warn("audio capture disabled", "err", err)
-				}
-			}
-			if frames == nil {
-				silenceCh := make(chan []int16, 1)
-				frames = silenceCh
-				go func() {
-					ticker := time.NewTicker(rtp.FrameDuration)
-					defer ticker.Stop()
-					silence := make([]int16, rtp.SamplesPerFrame)
-					for {
-						select {
-						case <-rtpCtx.Done():
-							close(silenceCh)
-							return
-						case <-ticker.C:
-							select {
-							case silenceCh <- silence:
-							default:
-							}
-						}
-					}
-				}()
-			}
-			go func() {
-				if err := tx.StreamFramesAt(rtpCtx, time.Now().UnixMilli(), frames); err != nil && rtpCtx.Err() == nil {
-					logger.Warn("rtp tx stopped with error", "err", err)
-				}
-			}()
-			defer func() { _ = tx.Close() }()
-		} else {
-			logger.Warn("rtp tx create failed", "remote_ip", raddr.IP.String(), "remote_port", raddr.Port, "err", err)
-		}
-		defer func() {
-			stats, err := rx.Stop()
-			if err != nil {
-				logger.Warn("rtp rx stop failed", "err", err)
-			}
-			if stats.Received > 0 {
-				logger.Info("rtp stats",
-					"received", stats.Received,
-					"expected", stats.Expected(),
-					"lost", stats.Lost(),
-					"jitter_ms", stats.JitterMs(),
-				)
-			}
-		}()
 	} else {
 		logger.Warn("rtp skipped: missing sdp addresses")
 	}

@@ -1,28 +1,9 @@
 package main
 
 import (
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestOnClientReset_DoesNotInterruptCall(t *testing.T) {
-	var st atomic.Uint32
-	st.Store(stateInCall)
-	onClientReset(&st)
-	if got, want := st.Load(), uint32(stateInCall); got != want {
-		t.Fatalf("state=%d want %d", got, want)
-	}
-}
-
-func TestOnClientReset_MovesToRegistrationWhenNotInCall(t *testing.T) {
-	var st atomic.Uint32
-	st.Store(stateUnregistered)
-	onClientReset(&st)
-	if got, want := st.Load(), uint32(stateRegistrationIdle); got != want {
-		t.Fatalf("state=%d want %d", got, want)
-	}
-}
 
 func TestKeepaliveShouldWarn_BoundariesAndRateLimit(t *testing.T) {
 	timeout := 2 * time.Second

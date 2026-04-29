@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sync/atomic"
 	"time"
 )
 
@@ -9,15 +8,11 @@ const (
 	stateUnregistered      uint32 = 0
 	stateRegistrationIdle  uint32 = 1
 	stateRegistrationQuery uint32 = 2
-	stateInCall            uint32 = 3
+	// stateCallSetup exists to properly model ClientReset behavior during SIP setup.
+	// If ClientReset arrives here, the SIP attempt must be aborted.
+	stateCallSetup uint32 = 3
+	stateInCall    uint32 = 4
 )
-
-func onClientReset(state *atomic.Uint32) {
-	// UNREGISTERED -> REGISTRATION (but don't interrupt an active call)
-	if state.Load() != stateInCall {
-		state.Store(stateRegistrationIdle)
-	}
-}
 
 func keepaliveShouldWarn(
 	state uint32,
