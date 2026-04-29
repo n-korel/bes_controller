@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"flag"
 	"net"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	app "bucis-bes_simulator/internal/app/bucis"
 	"bucis-bes_simulator/internal/control/protocol"
 	"bucis-bes_simulator/pkg/log"
 )
@@ -53,9 +53,7 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		fs := flag.NewFlagSet("bucis-test", flag.ContinueOnError)
-		fs.SetOutput(os.Stderr)
-		done <- run(ctx, logger, fs, "", "", "", 0, 0, "", "")
+		done <- app.Run(ctx, logger, app.Options{})
 	}()
 
 	answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
@@ -82,9 +80,9 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			_, _, ans, _, _, ok := protocol.Parse(buf[:n])
-			if ok && ans != nil {
-				return ans, nil
+			pkt, ok := protocol.Parse(buf[:n])
+			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
+				return pkt.Answer, nil
 			}
 			if time.Now().After(deadline) {
 				return nil, os.ErrDeadlineExceeded
@@ -179,9 +177,7 @@ func TestBUCIS_Reset_HeadSelection_FlagsOverEnv_AndHead2DefaultsToHead1(t *testi
 
 	done := make(chan error, 1)
 	go func() {
-		fs := flag.NewFlagSet("bucis-test", flag.ContinueOnError)
-		fs.SetOutput(os.Stderr)
-		done <- run(ctx, logger, fs, "", "", "", 0, 0, "1.1.1.1", "")
+		done <- app.Run(ctx, logger, app.Options{Head1IP: "1.1.1.1"})
 	}()
 
 	lconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
@@ -200,13 +196,13 @@ func TestBUCIS_Reset_HeadSelection_FlagsOverEnv_AndHead2DefaultsToHead1(t *testi
 			cancel()
 			t.Fatalf("read 8890: %v", err)
 		}
-		reset, _, _, _, _, ok := protocol.Parse(buf[:n])
-		if ok && reset != nil {
-			if reset.IPHead1 != "1.1.1.1" {
-				t.Fatalf("head1: got %q want %q", reset.IPHead1, "1.1.1.1")
+		pkt, ok := protocol.Parse(buf[:n])
+		if ok && pkt.Type == protocol.ECPacketClientReset && pkt.Reset != nil {
+			if pkt.Reset.IPHead1 != "1.1.1.1" {
+				t.Fatalf("head1: got %q want %q", pkt.Reset.IPHead1, "1.1.1.1")
 			}
-			if reset.IPHead2 != "1.1.1.1" {
-				t.Fatalf("head2: got %q want %q", reset.IPHead2, "1.1.1.1")
+			if pkt.Reset.IPHead2 != "1.1.1.1" {
+				t.Fatalf("head2: got %q want %q", pkt.Reset.IPHead2, "1.1.1.1")
 			}
 			break
 		}
@@ -257,9 +253,7 @@ func TestBUCIS_Answer_NewIP_PriorityFlagsOverEnv(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		fs := flag.NewFlagSet("bucis-test", flag.ContinueOnError)
-		fs.SetOutput(os.Stderr)
-		done <- run(ctx, logger, fs, "", "", "1.2.3.4", 0, 0, "", "")
+		done <- app.Run(ctx, logger, app.Options{OpenSIPSIP: "1.2.3.4"})
 	}()
 
 	answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
@@ -285,9 +279,9 @@ func TestBUCIS_Answer_NewIP_PriorityFlagsOverEnv(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			_, _, ans, _, _, ok := protocol.Parse(buf[:n])
-			if ok && ans != nil {
-				return ans, nil
+			pkt, ok := protocol.Parse(buf[:n])
+			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
+				return pkt.Answer, nil
 			}
 			if time.Now().After(deadline) {
 				return nil, os.ErrDeadlineExceeded
@@ -348,9 +342,7 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			fs := flag.NewFlagSet("bucis-test", flag.ContinueOnError)
-			fs.SetOutput(os.Stderr)
-			done <- run(ctx, logger, fs, "", "", "", 0, 0, "", "")
+			done <- app.Run(ctx, logger, app.Options{})
 		}()
 
 		answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
@@ -376,8 +368,8 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 			_ = answerConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 			n, _, err := answerConn.ReadFromUDP(buf)
 			if err == nil {
-				_, _, ans, _, _, ok := protocol.Parse(buf[:n])
-				if ok && ans != nil {
+				pkt, ok := protocol.Parse(buf[:n])
+				if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
 					break
 				}
 			}
@@ -402,9 +394,7 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			fs := flag.NewFlagSet("bucis-test", flag.ContinueOnError)
-			fs.SetOutput(os.Stderr)
-			done <- run(ctx, logger, fs, "", "", "", 0, 0, "", "")
+			done <- app.Run(ctx, logger, app.Options{})
 		}()
 
 		answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
@@ -435,8 +425,8 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 			_ = answerConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 			n, _, err := answerConn.ReadFromUDP(buf)
 			if err == nil {
-				_, _, ans, _, _, ok := protocol.Parse(buf[:n])
-				if ok && ans != nil {
+				pkt, ok := protocol.Parse(buf[:n])
+				if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
 					cancel()
 					_ = queryConn.Close()
 					_ = answerConn.Close()

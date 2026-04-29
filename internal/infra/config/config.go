@@ -38,7 +38,7 @@ type EC struct {
 }
 
 func ParseBucis() (Bucis, error) {
-	if err := loadDotEnv(); err != nil {
+	if err := loadDotEnv(".env"); err != nil {
 		return Bucis{}, err
 	}
 	ec, err := parseEC()
@@ -49,7 +49,7 @@ func ParseBucis() (Bucis, error) {
 }
 
 func ParseBes() (Bes, error) {
-	if err := loadDotEnv(); err != nil {
+	if err := loadDotEnv(".env"); err != nil {
 		return Bes{}, err
 	}
 

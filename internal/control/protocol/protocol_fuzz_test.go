@@ -18,42 +18,45 @@ func FuzzParse(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, b []byte) {
-		reset, query, answer, keepalive, conv, ok := Parse(b)
+		pkt, ok := Parse(b)
 		if !ok {
 			return
 		}
-		if reset == nil && query == nil && answer == nil && keepalive == nil && conv == nil {
-			t.Fatalf("ok=true but all messages are nil")
+		if pkt.Type == ECPacketUnknown {
+			t.Fatalf("ok=true but Type is unknown")
+		}
+		if pkt.Reset == nil && pkt.Query == nil && pkt.Answer == nil && pkt.KeepAlive == nil && pkt.Conversation == nil {
+			t.Fatalf("ok=true but all payloads are nil (pkt=%+v)", pkt)
 		}
 
-		if reset != nil {
-			rr, qq, aa, kk, cc, ok2 := Parse([]byte(FormatClientReset(reset.IPHead1, reset.IPHead2)))
-			if !ok2 || rr == nil || qq != nil || aa != nil || kk != nil || cc != nil {
-				t.Fatalf("roundtrip reset failed: ok=%v reset=%v", ok2, rr)
+		if pkt.Reset != nil {
+			p2, ok2 := Parse([]byte(FormatClientReset(pkt.Reset.IPHead1, pkt.Reset.IPHead2)))
+			if !ok2 || p2.Type != ECPacketClientReset || p2.Reset == nil || p2.Query != nil || p2.Answer != nil || p2.KeepAlive != nil || p2.Conversation != nil {
+				t.Fatalf("roundtrip reset failed: ok=%v pkt=%+v", ok2, p2)
 			}
 		}
-		if query != nil {
-			rr, qq, aa, kk, cc, ok2 := Parse([]byte(FormatClientQuery(query.MAC)))
-			if !ok2 || qq == nil || rr != nil || aa != nil || kk != nil || cc != nil {
-				t.Fatalf("roundtrip query failed: ok=%v query=%v", ok2, qq)
+		if pkt.Query != nil {
+			p2, ok2 := Parse([]byte(FormatClientQuery(pkt.Query.MAC)))
+			if !ok2 || p2.Type != ECPacketClientQuery || p2.Query == nil || p2.Reset != nil || p2.Answer != nil || p2.KeepAlive != nil || p2.Conversation != nil {
+				t.Fatalf("roundtrip query failed: ok=%v pkt=%+v", ok2, p2)
 			}
 		}
-		if answer != nil {
-			rr, qq, aa, kk, cc, ok2 := Parse([]byte(FormatClientAnswer(answer.NewIP, answer.SipID)))
-			if !ok2 || aa == nil || rr != nil || qq != nil || kk != nil || cc != nil {
-				t.Fatalf("roundtrip answer failed: ok=%v answer=%v", ok2, aa)
+		if pkt.Answer != nil {
+			p2, ok2 := Parse([]byte(FormatClientAnswer(pkt.Answer.NewIP, pkt.Answer.SipID)))
+			if !ok2 || p2.Type != ECPacketClientAnswer || p2.Answer == nil || p2.Reset != nil || p2.Query != nil || p2.KeepAlive != nil || p2.Conversation != nil {
+				t.Fatalf("roundtrip answer failed: ok=%v pkt=%+v", ok2, p2)
 			}
 		}
-		if keepalive != nil {
-			rr, qq, aa, kk, cc, ok2 := Parse([]byte(FormatKeepAlive(keepalive.OpenSIPSIP, keepalive.Status)))
-			if !ok2 || kk == nil || rr != nil || qq != nil || aa != nil || cc != nil {
-				t.Fatalf("roundtrip keepalive failed: ok=%v keepalive=%v", ok2, kk)
+		if pkt.KeepAlive != nil {
+			p2, ok2 := Parse([]byte(FormatKeepAlive(pkt.KeepAlive.OpenSIPSIP, pkt.KeepAlive.Status)))
+			if !ok2 || p2.Type != ECPacketServerKeepAlive || p2.KeepAlive == nil || p2.Reset != nil || p2.Query != nil || p2.Answer != nil || p2.Conversation != nil {
+				t.Fatalf("roundtrip keepalive failed: ok=%v pkt=%+v", ok2, p2)
 			}
 		}
-		if conv != nil {
-			rr, qq, aa, kk, cc, ok2 := Parse([]byte(FormatClientConversation(conv.SipID)))
-			if !ok2 || cc == nil || rr != nil || qq != nil || aa != nil || kk != nil {
-				t.Fatalf("roundtrip conv failed: ok=%v conv=%v", ok2, cc)
+		if pkt.Conversation != nil {
+			p2, ok2 := Parse([]byte(FormatClientConversation(pkt.Conversation.SipID)))
+			if !ok2 || p2.Type != ECPacketClientConversation || p2.Conversation == nil || p2.Reset != nil || p2.Query != nil || p2.Answer != nil || p2.KeepAlive != nil {
+				t.Fatalf("roundtrip conv failed: ok=%v pkt=%+v", ok2, p2)
 			}
 		}
 	})

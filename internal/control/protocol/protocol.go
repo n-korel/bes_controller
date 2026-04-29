@@ -4,6 +4,27 @@ import (
 	"strings"
 )
 
+type ECPacketType uint8
+
+const (
+	ECPacketUnknown ECPacketType = iota
+	ECPacketClientReset
+	ECPacketClientQuery
+	ECPacketClientAnswer
+	ECPacketServerKeepAlive
+	ECPacketClientConversation
+)
+
+type ECPacket struct {
+	Type ECPacketType
+
+	Reset        *ClientReset
+	Query        *ClientQuery
+	Answer       *ClientAnswer
+	KeepAlive    *KeepAlive
+	Conversation *ClientConversation
+}
+
 type ClientReset struct {
 	IPHead1 string
 	IPHead2 string
@@ -27,15 +48,15 @@ type ClientConversation struct {
 	SipID string
 }
 
-func Parse(b []byte) (reset *ClientReset, query *ClientQuery, answer *ClientAnswer, keepalive *KeepAlive, conv *ClientConversation, ok bool) {
+func Parse(b []byte) (pkt ECPacket, ok bool) {
 	s := strings.TrimSpace(string(b))
 	if s == "" {
-		return nil, nil, nil, nil, nil, false
+		return ECPacket{}, false
 	}
 
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
-		return nil, nil, nil, nil, nil, false
+		return ECPacket{}, false
 	}
 	cmd := fields[0]
 	rest := strings.TrimSpace(s[len(cmd):])
@@ -44,55 +65,55 @@ func Parse(b []byte) (reset *ClientReset, query *ClientQuery, answer *ClientAnsw
 	case "ec_client_reset":
 		parts, ok := splitNonEmptySemicolonPartsWithTrailing(rest)
 		if !ok {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
 		if len(parts) != 2 {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
-		return &ClientReset{IPHead1: parts[0], IPHead2: parts[1]}, nil, nil, nil, nil, true
+		return ECPacket{Type: ECPacketClientReset, Reset: &ClientReset{IPHead1: parts[0], IPHead2: parts[1]}}, true
 
 	case "ec_client_query":
 		mac := strings.TrimSpace(rest)
 		if mac == "" {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
 		if strings.Contains(mac, ";") {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
-		return nil, &ClientQuery{MAC: mac}, nil, nil, nil, true
+		return ECPacket{Type: ECPacketClientQuery, Query: &ClientQuery{MAC: mac}}, true
 
 	case "ec_client_answer":
 		parts, ok := splitNonEmptySemicolonPartsWithTrailing(rest)
 		if !ok {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
 		if len(parts) != 2 {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
-		return nil, nil, &ClientAnswer{NewIP: parts[0], SipID: parts[1]}, nil, nil, true
+		return ECPacket{Type: ECPacketClientAnswer, Answer: &ClientAnswer{NewIP: parts[0], SipID: parts[1]}}, true
 
 	case "ec_server_keepalive":
 		parts, ok := splitNonEmptySemicolonPartsWithTrailing(rest)
 		if !ok {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
 		if len(parts) != 2 {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
-		return nil, nil, nil, &KeepAlive{OpenSIPSIP: parts[0], Status: parts[1]}, nil, true
+		return ECPacket{Type: ECPacketServerKeepAlive, KeepAlive: &KeepAlive{OpenSIPSIP: parts[0], Status: parts[1]}}, true
 
 	case "ec_client_conversation":
 		parts, ok := splitNonEmptySemicolonPartsWithTrailing(rest)
 		if !ok {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
 		if len(parts) != 1 {
-			return nil, nil, nil, nil, nil, false
+			return ECPacket{}, false
 		}
-		return nil, nil, nil, nil, &ClientConversation{SipID: parts[0]}, true
+		return ECPacket{Type: ECPacketClientConversation, Conversation: &ClientConversation{SipID: parts[0]}}, true
 
 	default:
-		return nil, nil, nil, nil, nil, false
+		return ECPacket{}, false
 	}
 }
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,10 +53,28 @@ func Start(
 				}
 			})
 			go func() {
+				silence := make([]int16, rtp.SamplesPerFrame)
+
+				// Небольшой prefill буфера вывода снижает шанс underrun на старте.
+				// Можно переопределить количеством кадров через AUDIO_PLAYOUT_PREFILL_FRAMES (0 выключает).
+				prefillFrames := 10
+				if v := strings.TrimSpace(os.Getenv("AUDIO_PLAYOUT_PREFILL_FRAMES")); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						if n < 0 {
+							n = 0
+						}
+						prefillFrames = n
+					}
+				}
+				for i := 0; i < prefillFrames; i++ {
+					if err := pb.WritePCM(silence); err != nil {
+						return
+					}
+				}
+
 				t := time.NewTicker(rtp.FrameDuration)
 				defer t.Stop()
 
-				silence := make([]int16, rtp.SamplesPerFrame)
 				var last []int16
 				for {
 					select {
@@ -71,10 +92,14 @@ func Start(
 						}
 					play:
 						if last == nil || len(last) != rtp.SamplesPerFrame {
-							_ = pb.WritePCM(silence)
+							if err := pb.WritePCM(silence); err != nil {
+								return
+							}
 							continue
 						}
-						_ = pb.WritePCM(last)
+						if err := pb.WritePCM(last); err != nil {
+							return
+						}
 					}
 				}
 			}()
@@ -161,11 +186,12 @@ func Start(
 	}()
 
 	// 4) TX create
-	tx, err = sender.NewTo(remoteAddr)
-	if err != nil {
-		if c := rx.Conn(); c != nil {
-			tx, err = sender.NewFromConn(c, remoteAddr)
-		}
+	// Важно: TX должна идти с того же локального порта, что и RX. Иначе удалённая сторона
+	// может отвечать ICMP Port Unreachable и на connected-UDP сокете мы увидим ECONNREFUSED.
+	if c := rx.Conn(); c != nil {
+		tx, err = sender.NewFromConn(c, remoteAddr)
+	} else {
+		tx, err = sender.NewTo(remoteAddr)
 	}
 	if err != nil {
 		logger.Warn("rtp tx create failed", "remote_ip", remoteAddr.IP.String(), "remote_port", remoteAddr.Port, "err", err)

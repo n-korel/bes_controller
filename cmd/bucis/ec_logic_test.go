@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"sync"
 	"testing"
 	"time"
 
@@ -58,47 +57,6 @@ func TestChooseECdst_OverrideWins(t *testing.T) {
 	}
 	if got, want := chooseECdst("bcast", ""), "bcast"; got != want {
 		t.Fatalf("got %q want %q", got, want)
-	}
-}
-
-func TestSipIDState_GetSipID_IsStableAndConcurrent(t *testing.T) {
-	st := newSipIDState()
-
-	const goroutines = 32
-	var wg sync.WaitGroup
-	wg.Add(goroutines)
-
-	ids := make(chan string, goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-			ids <- st.getSipID("aa:bb:cc:dd:ee:ff")
-		}()
-	}
-	wg.Wait()
-	close(ids)
-
-	var first string
-	for id := range ids {
-		if first == "" {
-			first = id
-			continue
-		}
-		if id != first {
-			t.Fatalf("concurrent getSipID returned different ids: %q vs %q", first, id)
-		}
-	}
-	if first == "" {
-		t.Fatalf("empty sip id")
-	}
-}
-
-func TestSipIDState_SetGet_EmptyValuesIgnored(t *testing.T) {
-	st := newSipIDState()
-	st.setSipIDIP("", "1.2.3.4")
-	st.setSipIDIP("1", "")
-	if _, ok := st.getSipIDIP("1"); ok {
-		t.Fatalf("expected empty set to be ignored")
 	}
 }
 

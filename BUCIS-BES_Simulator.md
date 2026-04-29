@@ -74,6 +74,7 @@
   - `EC_BES_ADDR` (unicast override)
   - `EC_CLIENT_RESET_INTERVAL` (default `5s`)
   - `EC_KEEPALIVE_INTERVAL` (default `2s`)
+  - `EC_KEEPALIVE_TIMEOUT` (default: `3 * EC_KEEPALIVE_INTERVAL`; `0`/unset does **not** disable, it enables the default rule)
   - `EC_CLIENT_ANSWER_TIMEOUT` (default `3s`)
   - `EC_CLIENT_QUERY_RETRY_INTERVAL` (default `1s`)
   - `EC_CLIENT_QUERY_MAX_RETRIES` (default `3`)
@@ -1005,7 +1006,7 @@ MVP контракт:
   - `EC_BUCIS_QUERY_PORT_6710`: основной порт `ClientQuery` (6710)
   - `EC_BUCIS_QUERY_PORT_7777`: дополнительный (7777)
 - **SIP**:
-  - `SIP_DOMAIN`: IP/host OpenSIPS (в MVP — IP `bucis`)
+  - `SIP_DOMAIN`: IP/host OpenSIPS. В дефолтном стенде обычно совпадает с IP `bucis` (OpenSIPS рядом), но это не обязательное требование.
   - `SIP_PORT`: 5060
   - `SIP_USER_BES`, `SIP_USER_BUCIS`: логины абонентов
 - **RTP**:

@@ -2,17 +2,19 @@ package config
 
 import (
 	"os"
-	"sync"
 )
 
 // resetDotEnvForTest сбрасывает кеш загрузки .env между тестами.
 // Файл *_test.go, чтобы эта возможность не попадала в продакшен-сборку.
 func resetDotEnvForTest() {
-	loadDotEnvOnce = sync.Once{}
-	loadDotEnvErr = nil
-	for _, k := range loadedDotEnvKeys {
-		_ = os.Unsetenv(k)
+	dotenvMu.Lock()
+	defer dotenvMu.Unlock()
+
+	for k, v := range dotenvSetValues {
+		if cur, ok := os.LookupEnv(k); ok && cur == v {
+			_ = os.Unsetenv(k)
+		}
 	}
-	loadedDotEnvKeys = nil
+	dotenvSetValues = make(map[string]string)
 }
 

@@ -34,6 +34,7 @@ type Phone struct {
 	UA *sipgo.UserAgent
 	// listenAddrs is map of transport:addr which will phone use to listen incoming requests
 	listenAddrs []ListenAddr
+	udpConn     *net.UDPConn
 
 	log zerolog.Logger
 
@@ -68,6 +69,14 @@ func WithPhoneListenAddr(addr ListenAddr) PhoneOption {
 func WithPhoneLogger(l zerolog.Logger) PhoneOption {
 	return func(p *Phone) {
 		p.log = l
+	}
+}
+
+// WithPhoneUDPConn allows caller to pass already-bound UDP socket to be used
+// for server listener. This avoids bind races when caller must reserve a port.
+func WithPhoneUDPConn(conn *net.UDPConn) PhoneOption {
+	return func(p *Phone) {
+		p.udpConn = conn
 	}
 }
 
@@ -114,6 +123,34 @@ func (p *Phone) createServerListener(s *sipgo.Server, a ListenAddr) (*Listener, 
 	network, addr := a.Network, a.Addr
 	switch network {
 	case "udp":
+		if p.udpConn != nil {
+			// If caller provided an already bound socket, prefer it over creating a new one.
+			// When Addr has a specific host:port, ensure it matches the provided conn.
+			if addr != "" {
+				want, err := net.ResolveUDPAddr("udp", addr)
+				if err != nil {
+					return nil, fmt.Errorf("fail to resolve address. err=%w", err)
+				}
+				got, ok := p.udpConn.LocalAddr().(*net.UDPAddr)
+				if !ok || got == nil {
+					return nil, fmt.Errorf("udp conn has unexpected local addr type")
+				}
+				if want.Port != 0 && got.Port != want.Port {
+					return nil, fmt.Errorf("udp conn port mismatch: want=%d got=%d", want.Port, got.Port)
+				}
+				if want.IP != nil && !want.IP.IsUnspecified() && got.IP != nil && !got.IP.IsUnspecified() && !want.IP.Equal(got.IP) {
+					return nil, fmt.Errorf("udp conn ip mismatch: want=%s got=%s", want.IP.String(), got.IP.String())
+				}
+			}
+
+			a.Addr = p.udpConn.LocalAddr().String()
+			return &Listener{
+				a,
+				p.udpConn,
+				func() error { return s.ServeUDP(p.udpConn) },
+			}, nil
+		}
+
 		// resolve local UDP endpoint
 		laddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {

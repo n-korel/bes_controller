@@ -9,12 +9,17 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 type Playback struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
+
+	mu  sync.Mutex
+	buf []byte
 }
 
 func StartPlayback(ctx context.Context, device string) (*Playback, error) {
@@ -25,14 +30,28 @@ func StartPlayback(ctx context.Context, device string) (*Playback, error) {
 		return nil, errors.New("alsa playback disabled (ALSA_DEVICE=null)")
 	}
 
-	cmd := exec.CommandContext(ctx, "aplay",
+	args := []string{
 		"-q",
 		"-D", device,
 		"-f", "S16_LE",
 		"-c", "1",
 		"-r", "8000",
 		"-t", "raw",
-	)
+	}
+
+	// По умолчанию даём aplay чуть больший буфер, чтобы меньше ловить underrun
+	// из-за планировщика/GC. Можно переопределить через env или выключить (0).
+	if v := strings.TrimSpace(os.Getenv("AUDIO_APLAY_BUFFER_US")); v != "" {
+		if us, err := strconv.Atoi(v); err == nil {
+			if us > 0 {
+				args = append(args, "-B", strconv.Itoa(us))
+			}
+		}
+	} else {
+		args = append(args, "-B", "200000")
+	}
+
+	cmd := exec.CommandContext(ctx, "aplay", args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
@@ -56,7 +75,17 @@ func (p *Playback) WritePCM(pcm []int16) error {
 	if p == nil || p.stdin == nil || len(pcm) == 0 {
 		return nil
 	}
-	buf := make([]byte, len(pcm)*2)
+
+	p.mu.Lock()
+	n := len(pcm) * 2
+	if cap(p.buf) < n {
+		p.buf = make([]byte, n)
+	} else {
+		p.buf = p.buf[:n]
+	}
+	buf := p.buf
+	p.mu.Unlock()
+
 	for i, s := range pcm {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
 	}
