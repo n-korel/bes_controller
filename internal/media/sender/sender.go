@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"bucis-bes_simulator/internal/media/g726"
@@ -68,12 +69,20 @@ func (s *Sender) write(raw []byte) (int, error) {
 	if s.conn.RemoteAddr() != nil {
 		n, err := s.conn.Write(raw)
 		if err != nil {
+			// При гонках закрытия shared-conn можем получить EBADF вместо net.ErrClosed.
+			// Нормализуем в net.ErrClosed, чтобы callers могли стабильно проверять errors.Is(err, net.ErrClosed).
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EBADF) {
+				return n, net.ErrClosed
+			}
 			return n, fmt.Errorf("udp write: %w", err)
 		}
 		return n, nil
 	}
 	n, err := s.conn.WriteToUDP(raw, s.addr)
 	if err != nil {
+		if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EBADF) {
+			return n, net.ErrClosed
+		}
 		return n, fmt.Errorf("udp write to %s: %w", s.addr.String(), err)
 	}
 	return n, nil
@@ -180,6 +189,17 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		case <-ctx.Done():
 			return fmt.Errorf("context done: %w", ctx.Err())
 		default:
+		}
+
+		// Если мы отстали больше чем на один фрейм (GC pause, scheduler stall и т.п.),
+		// не пытаемся "догонять" реальное время burst-ом пакетов.
+		// Вместо этого пропускаем интервалы, но сохраняем корректный ход RTP timestamp.
+		if now := time.Now(); now.After(frameTime) {
+			missed := now.Sub(frameTime) / mediarpt.FrameDuration
+			if missed > 0 {
+				rtpTS += uint32(missed) * mediarpt.SamplesPerFrame
+				frameTime = frameTime.Add(missed * mediarpt.FrameDuration)
+			}
 		}
 
 		if d := time.Until(frameTime); d > 0 {

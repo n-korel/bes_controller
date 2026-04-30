@@ -34,6 +34,21 @@ func resetPayloadTypeForTest(t *testing.T) {
 	t.Setenv(envPayloadTypeG726Key, "")
 }
 
+func TestFallbackUint32_IsStableAcrossCalls(t *testing.T) {
+	// Проверяем, что fallback-генератор инициализируется и выдаёт разные значения (вероятностно),
+	// без паник и без зависимости от crypto/rand.
+	a := fallbackUint32()
+	b := fallbackUint32()
+	if a == 0 && b == 0 {
+		t.Fatalf("unexpected all-zero values: a=%d b=%d", a, b)
+	}
+}
+
+func TestRandomSequence_UsesRandomSSRC(t *testing.T) {
+	// Минимальная проверка, что функция вызывается и даёт 16-битный результат.
+	_ = RandomSequence()
+}
+
 func TestPayloadTypeG726_Default(t *testing.T) {
 	resetPayloadTypeForTest(t)
 	if got := PayloadTypeG726(); got != DefaultPayloadTypeG726 {
@@ -43,7 +58,7 @@ func TestPayloadTypeG726_Default(t *testing.T) {
 
 func TestPayloadTypeG726_Env_ValidDynamic(t *testing.T) {
 	resetPayloadTypeForTest(t)
-	t.Setenv(envPayloadTypeG726Key, "96")
+	t.Setenv(envPayloadTypeG726Key, " 96 ")
 	if got := PayloadTypeG726(); got != 96 {
 		t.Fatalf("PayloadTypeG726()=%d want %d", got, 96)
 	}

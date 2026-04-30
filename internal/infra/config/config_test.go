@@ -27,6 +27,106 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestParsePortRange(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantMin int
+		wantMax int
+		wantOK  bool
+	}{
+		{raw: "", wantOK: false},
+		{raw: " ", wantOK: false},
+		{raw: "0", wantOK: false},
+		{raw: "65536", wantOK: false},
+		{raw: "123", wantMin: 123, wantMax: 123, wantOK: true},
+		{raw: "1-2", wantMin: 1, wantMax: 2, wantOK: true},
+		{raw: " 10 - 20 ", wantMin: 10, wantMax: 20, wantOK: true},
+		{raw: "20-10", wantOK: false},
+		{raw: "1-65535", wantMin: 1, wantMax: 65535, wantOK: true},
+		{raw: "1-65536", wantOK: false},
+		{raw: "1-2-3", wantOK: false},
+		{raw: "abc", wantOK: false},
+		{raw: "1-abc", wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			min, max, ok := parsePortRange(tc.raw)
+			if ok != tc.wantOK {
+				t.Fatalf("ok=%v want %v (min=%d max=%d)", ok, tc.wantOK, min, max)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if min != tc.wantMin || max != tc.wantMax {
+				t.Fatalf("min=%d max=%d want %d-%d", min, max, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+func TestValidateRTPPortRangeEnv(t *testing.T) {
+	t.Run("unset_ok", func(t *testing.T) {
+		t.Setenv("RTP_PORT_RANGE", "")
+		if err := validateRTPPortRangeEnv(); err != nil {
+			t.Fatalf("validateRTPPortRangeEnv: %v", err)
+		}
+	})
+	t.Run("single_port_ok", func(t *testing.T) {
+		t.Setenv("RTP_PORT_RANGE", "40000")
+		if err := validateRTPPortRangeEnv(); err != nil {
+			t.Fatalf("validateRTPPortRangeEnv: %v", err)
+		}
+	})
+	t.Run("range_ok", func(t *testing.T) {
+		t.Setenv("RTP_PORT_RANGE", "40000-40100")
+		if err := validateRTPPortRangeEnv(); err != nil {
+			t.Fatalf("validateRTPPortRangeEnv: %v", err)
+		}
+	})
+	t.Run("invalid_fails", func(t *testing.T) {
+		t.Setenv("RTP_PORT_RANGE", "bad")
+		if err := validateRTPPortRangeEnv(); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("out_of_bounds_fails", func(t *testing.T) {
+		t.Setenv("RTP_PORT_RANGE", "0-10")
+		if err := validateRTPPortRangeEnv(); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestGetEnvUint64Default(t *testing.T) {
+	t.Run("unset_returns_default", func(t *testing.T) {
+		t.Setenv("UINT64_KEY", "")
+		got, err := getEnvUint64Default("UINT64_KEY", 42)
+		if err != nil {
+			t.Fatalf("getEnvUint64Default: %v", err)
+		}
+		if got != 42 {
+			t.Fatalf("got=%d want %d", got, 42)
+		}
+	})
+	t.Run("valid_parses_and_trims", func(t *testing.T) {
+		t.Setenv("UINT64_KEY", "  184467  ")
+		got, err := getEnvUint64Default("UINT64_KEY", 0)
+		if err != nil {
+			t.Fatalf("getEnvUint64Default: %v", err)
+		}
+		if got != 184467 {
+			t.Fatalf("got=%d want %d", got, 184467)
+		}
+	})
+	t.Run("invalid_fails", func(t *testing.T) {
+		t.Setenv("UINT64_KEY", "nope")
+		_, err := getEnvUint64Default("UINT64_KEY", 0)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
 func TestParseBrs_Defaults(t *testing.T) {
 	resetDotEnv(t)
 	t.Setenv("EC_LISTEN_PORT_8890", "")
@@ -138,6 +238,35 @@ func TestParseBes_KeepAliveTimeout_CanDisableMonitoringWithMinusOne(t *testing.T
 func TestParseBes_MaxRetriesMustBePositive(t *testing.T) {
 	resetDotEnv(t)
 	t.Setenv("EC_CLIENT_QUERY_MAX_RETRIES", "0")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_QueryDstPort_OutOfRangeFails(t *testing.T) {
+	resetDotEnv(t)
+
+	t.Run("zero", func(t *testing.T) {
+		t.Setenv("EC_BES_QUERY_DST_PORT", "0")
+		_, err := ParseBes()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("too_large", func(t *testing.T) {
+		t.Setenv("EC_BES_QUERY_DST_PORT", "65536")
+		_, err := ParseBes()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestParseBes_SipIDModulo_OneFails(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_SIPID_MODULO", "1")
+
 	_, err := ParseBes()
 	if err == nil {
 		t.Fatal("expected error")

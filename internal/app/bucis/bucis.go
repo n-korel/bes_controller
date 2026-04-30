@@ -320,6 +320,22 @@ func isIPv4LimitedBroadcast(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && ip.Equal(net.IPv4bcast)
 }
 
+func normalizeSIPID(fromUser string) string {
+	u := strings.TrimSpace(fromUser)
+	if strings.HasPrefix(u, "bes_") {
+		return strings.TrimPrefix(u, "bes_")
+	}
+	return u
+}
+
+func hostFromSIPSource(src string) string {
+	host := strings.TrimSpace(src)
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		return h
+	}
+	return host
+}
+
 //nolint:gocyclo // Инициализация SIP + регистрация + Answer loop: держим линейно, чтобы легче сопровождать.
 func (b *BUCIS) initSIP(ctx context.Context, wg *sync.WaitGroup) bool {
 	bucisUser := strings.TrimSpace(os.Getenv("SIP_USER_BUCIS"))
@@ -520,12 +536,7 @@ func (b *BUCIS) initSIP(ctx context.Context, wg *sync.WaitGroup) bool {
 
 			var sipID string
 			if dialog != nil && dialog.InviteRequest != nil && dialog.InviteRequest.From() != nil {
-				u := strings.TrimSpace(dialog.InviteRequest.From().Address.User)
-				if strings.HasPrefix(u, "bes_") {
-					sipID = strings.TrimPrefix(u, "bes_")
-				} else {
-					sipID = u
-				}
+				sipID = normalizeSIPID(dialog.InviteRequest.From().Address.User)
 			}
 
 			var (
@@ -536,11 +547,7 @@ func (b *BUCIS) initSIP(ctx context.Context, wg *sync.WaitGroup) bool {
 				besIP, ok = b.sipIDs.GetIP(sipID)
 			}
 			if !ok && dialog != nil && dialog.InviteRequest != nil {
-				src := strings.TrimSpace(dialog.InviteRequest.Source())
-				host := src
-				if h, _, err := net.SplitHostPort(src); err == nil && h != "" {
-					host = h
-				}
+				host := hostFromSIPSource(dialog.InviteRequest.Source())
 				if host != "" {
 					if s, found := b.sipIDs.FindBySenderIP(host); found {
 						sipID = s

@@ -491,11 +491,13 @@ func (s *DialogClientSession) isEarlyDialog() bool {
 // NOTE: it does not copy Via header. This is left to transport or caller to enforce
 func newAckRequestUAC(inviteRequest *sip.Request, inviteResponse *sip.Response, body []byte) *sip.Request {
 	Recipient := &inviteRequest.Recipient
+	contactUsable := false
 	if contact := inviteResponse.Contact(); contact != nil {
 		// Some proxies/UAs may send an unspecified Contact host (0.0.0.0).
 		// In that case, ignore Contact and fallback to original recipient.
 		if ip := net.ParseIP(contact.Address.Host); ip == nil || !ip.IsUnspecified() {
 			Recipient = &contact.Address
+			contactUsable = true
 		}
 	}
 	ackRequest := sip.NewRequest(
@@ -548,11 +550,12 @@ func newAckRequestUAC(inviteRequest *sip.Request, inviteResponse *sip.Response, 
 	ackRequest.SetTransport(inviteRequest.Transport())
 	ackRequest.SetSource(inviteRequest.Source())
 	ackRequest.Laddr = inviteRequest.Laddr
-
-	// Ensure we send ACK to the same network destination as the 2xx response source.
-	// This makes ACK resilient to invalid/unroutable Contact headers (e.g. 0.0.0.0).
-	if src := inviteResponse.Source(); src != "" {
-		ackRequest.SetDestination(src)
+	// If Contact is invalid/unusable, fall back to the 2xx response source.
+	// In proxied scenarios without Record-Route, ACK must go directly to Contact.
+	if !contactUsable {
+		if src := inviteResponse.Source(); src != "" {
+			ackRequest.SetDestination(src)
+		}
 	}
 	return ackRequest
 }

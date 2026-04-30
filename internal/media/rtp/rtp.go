@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +23,7 @@ const (
 const envPayloadTypeG726Key = "RTP_G726_PT"
 
 func PayloadTypeG726() uint8 {
-	raw := os.Getenv(envPayloadTypeG726Key)
+	raw := strings.TrimSpace(os.Getenv(envPayloadTypeG726Key))
 	if raw == "" {
 		return DefaultPayloadTypeG726
 	}

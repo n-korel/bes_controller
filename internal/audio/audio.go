@@ -13,14 +13,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Playback struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 
-	mu  sync.Mutex
-	buf []byte
+	mu        sync.Mutex
+	buf       []byte
+	closeOnce sync.Once
 }
 
 func StartPlayback(ctx context.Context, device string) (*Playback, error) {
@@ -101,16 +103,36 @@ func (p *Playback) Close() error {
 	if p == nil {
 		return nil
 	}
-	if p.stdin != nil {
-		_ = p.stdin.Close()
-	}
-	if p.cmd != nil {
-		if err := p.cmd.Wait(); err != nil {
-			return fmt.Errorf("aplay wait: %w", err)
+	var err error
+	p.closeOnce.Do(func() {
+		if p.stdin != nil {
+			_ = p.stdin.Close()
 		}
-		return nil
-	}
-	return nil
+		if p.cmd == nil {
+			return
+		}
+
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- p.cmd.Wait() }()
+
+		select {
+		case werr := <-waitDone:
+			if werr != nil {
+				err = fmt.Errorf("aplay wait: %w", werr)
+			}
+		case <-time.After(2 * time.Second):
+			// Если внешний проигрыватель завис/не завершается после EOF,
+			// не даём Close() блокировать cleanup навсегда.
+			if p.cmd.Process != nil {
+				_ = p.cmd.Process.Kill()
+			}
+			werr := <-waitDone
+			if werr != nil {
+				err = fmt.Errorf("aplay wait after kill: %w", werr)
+			}
+		}
+	})
+	return err
 }
 
 func StartCaptureFrames(ctx context.Context, device string) (<-chan []int16, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,12 @@ import (
 	"bucis-bes_simulator/pkg/log"
 )
 
+var (
+	notifyContext           = signal.NotifyContext
+	appRun                  = app.Run
+	stdin         io.Reader = os.Stdin
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -24,13 +31,17 @@ func main() {
 }
 
 func run() error {
-	pressFlag := flag.Bool("press", false, "send ClientQuery immediately after first ClientReset")
-	flag.Parse()
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	pressFlag := fs.Bool("press", false, "send ClientQuery immediately after first ClientReset")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
 
 	log.Init(os.Getenv("LOG_FORMAT"))
 	logger := log.With("role", "bes")
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	cfg, err := config.ParseBes()
@@ -75,8 +86,9 @@ func run() error {
 	// Reader for external "press" command (one line: "press").
 	// This is the trigger for REGISTRATION_IDLE -> REGISTRATION_QUERYING.
 	pressCh := make(chan struct{}, 1)
+	r := stdin
 	go func() {
-		sc := bufio.NewScanner(os.Stdin)
+		sc := bufio.NewScanner(r)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line != "press" {
@@ -90,7 +102,7 @@ func run() error {
 		}
 	}()
 
-	if err := app.Run(ctx, logger, cfg, app.Options{
+	if err := appRun(ctx, logger, cfg, app.Options{
 		MAC:                      mac,
 		PressCh:                  pressCh,
 		AutoPressAfterFirstReset: *pressFlag,

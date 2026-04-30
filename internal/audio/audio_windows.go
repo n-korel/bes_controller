@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Windows implementation uses external tools:
@@ -22,6 +24,8 @@ import (
 type Playback struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
+
+	closeOnce sync.Once
 }
 
 func StartPlayback(ctx context.Context, device string) (*Playback, error) {
@@ -77,13 +81,28 @@ func (p *Playback) Close() error {
 	if p == nil {
 		return nil
 	}
-	if p.stdin != nil {
-		_ = p.stdin.Close()
-	}
-	if p.cmd != nil {
-		return p.cmd.Wait()
-	}
-	return nil
+	var err error
+	p.closeOnce.Do(func() {
+		if p.stdin != nil {
+			_ = p.stdin.Close()
+		}
+		if p.cmd == nil {
+			return
+		}
+
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- p.cmd.Wait() }()
+
+		select {
+		case err = <-waitDone:
+		case <-time.After(2 * time.Second):
+			if p.cmd.Process != nil {
+				_ = p.cmd.Process.Kill()
+			}
+			err = <-waitDone
+		}
+	})
+	return err
 }
 
 func StartCaptureFrames(ctx context.Context, device string) (<-chan []int16, error) {

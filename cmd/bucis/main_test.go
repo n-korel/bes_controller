@@ -37,6 +37,7 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 
 	t.Setenv("LOG_FORMAT", "console")
 	t.Setenv("SIP_DOMAIN", "127.0.0.1")
+	t.Setenv("EC_SIPID_MODULO", "")
 
 	t.Setenv("EC_BUCIS_QUERY_PORT_6710", strconv.Itoa(q6710))
 	t.Setenv("EC_BUCIS_QUERY_PORT_7777", strconv.Itoa(q7777))
@@ -138,6 +139,127 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 	ans3 := queryAndGet("AA:BB:CC:DD:EE:02")
 	if ans3.SipID == ans1.SipID {
 		t.Fatalf("SipID must differ for different MAC: got %q and %q", ans1.SipID, ans3.SipID)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run did not stop after context cancel")
+	}
+}
+
+func TestBUCIS_SipID_StableAfterModulo_ZeroSipID_NeverReturned(t *testing.T) {
+	q6710 := freeUDPPort(t)
+	q7777 := freeUDPPort(t)
+	answerPort := freeUDPPort(t)
+
+	t.Setenv("LOG_FORMAT", "console")
+	t.Setenv("SIP_DOMAIN", "127.0.0.1")
+	t.Setenv("EC_SIPID_MODULO", "2")
+
+	t.Setenv("EC_BUCIS_QUERY_PORT_6710", strconv.Itoa(q6710))
+	t.Setenv("EC_BUCIS_QUERY_PORT_7777", strconv.Itoa(q7777))
+	t.Setenv("EC_LISTEN_PORT_8890", strconv.Itoa(answerPort))
+
+	// Чтобы тест не пытался слать в broadcast и не спамил по таймерам.
+	t.Setenv("EC_BES_BROADCAST_ADDR", "127.0.0.1")
+	t.Setenv("EC_CLIENT_RESET_INTERVAL", "1h")
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "1h")
+
+	// SIP часть должна быть отключена.
+	t.Setenv("SIP_USER_BUCIS", "")
+	t.Setenv("SIP_PASS_BUCIS", "")
+
+	log.Init(os.Getenv("LOG_FORMAT"))
+	logger := log.With("role", "bucis-test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Run(ctx, logger, app.Options{})
+	}()
+
+	answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
+	if err != nil {
+		cancel()
+		t.Fatalf("listen answer: %v", err)
+	}
+	defer func() { _ = answerConn.Close() }()
+
+	queryConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		cancel()
+		t.Fatalf("listen query: %v", err)
+	}
+	defer func() { _ = queryConn.Close() }()
+	queryDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: q6710}
+
+	readAnswerUntil := func(deadline time.Time) (*protocol.ClientAnswer, error) {
+		t.Helper()
+		buf := make([]byte, 2048)
+		for {
+			_ = answerConn.SetReadDeadline(deadline)
+			n, _, err := answerConn.ReadFromUDP(buf)
+			if err != nil {
+				return nil, fmt.Errorf("read answer: %w", err)
+			}
+			pkt, ok := protocol.Parse(buf[:n])
+			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
+				return pkt.Answer, nil
+			}
+			if time.Now().After(deadline) {
+				return nil, os.ErrDeadlineExceeded
+			}
+		}
+	}
+
+	writeQuery := func(mac string) {
+		t.Helper()
+		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		if _, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery(mac)), queryDst); err != nil {
+			t.Fatalf("write query: %v", err)
+		}
+	}
+
+	queryAndGet := func(mac string) *protocol.ClientAnswer {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for attempt := 0; attempt < 25; attempt++ {
+			writeQuery(mac)
+			ans, err := readAnswerUntil(time.Now().Add(150 * time.Millisecond))
+			if err == nil {
+				return ans
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timeout waiting for ec_client_answer for mac=%q (last err=%v)", mac, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("timeout waiting for ec_client_answer for mac=%q", mac)
+		return nil
+	}
+
+	// modulo=2 даёт sipID "1" для первого нового MAC (seq=1) и "2" для второго (seq=2),
+	// при этом "0" никогда не должен возвращаться.
+	ans1 := queryAndGet("AA:BB:CC:DD:EE:41")
+	if ans1.SipID == "" || ans1.SipID == "0" {
+		t.Fatalf("SipID must not be empty or zero: %q", ans1.SipID)
+	}
+
+	ans1b := queryAndGet("AA:BB:CC:DD:EE:41")
+	if ans1b.SipID != ans1.SipID {
+		t.Fatalf("SipID must be stable after modulo for same MAC: got %q then %q", ans1.SipID, ans1b.SipID)
+	}
+
+	ans2 := queryAndGet("AA:BB:CC:DD:EE:42")
+	if ans2.SipID == "" || ans2.SipID == "0" {
+		t.Fatalf("SipID must not be empty or zero: %q", ans2.SipID)
 	}
 
 	cancel()

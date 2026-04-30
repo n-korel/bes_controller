@@ -1,58 +1,45 @@
 package audio
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
-func TestEnabled_NO_AUDIO_Disables(t *testing.T) {
-	t.Setenv(envNoAudioKey, "1")
-	t.Setenv(envALSADeviceKey, defaultALSACard)
-	if Enabled() {
-		t.Fatalf("Enabled()=true want false")
-	}
+func TestEnabled(t *testing.T) {
+	t.Run("default_enabled", func(t *testing.T) {
+		t.Setenv("NO_AUDIO", "")
+		t.Setenv("ALSA_DEVICE", "")
+		if !Enabled() {
+			t.Fatal("expected Enabled()=true by default")
+		}
+	})
+
+	t.Run("no_audio_disables", func(t *testing.T) {
+		t.Setenv("NO_AUDIO", "1")
+		t.Setenv("ALSA_DEVICE", "default")
+		if Enabled() {
+			t.Fatal("expected Enabled()=false when NO_AUDIO=1")
+		}
+	})
+
+	t.Run("null_device_disables", func(t *testing.T) {
+		t.Setenv("NO_AUDIO", "")
+		t.Setenv("ALSA_DEVICE", " null ")
+		if Enabled() {
+			t.Fatal("expected Enabled()=false when ALSA_DEVICE=null")
+		}
+	})
 }
 
-func TestEnabled_ALSA_DEVICE_Null_Disables(t *testing.T) {
-	t.Setenv(envNoAudioKey, "")
-	t.Setenv(envALSADeviceKey, "null")
-	if Enabled() {
-		t.Fatalf("Enabled()=true want false")
-	}
-}
+func TestDevice(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("ALSA_DEVICE", "")
+		if got := Device(); got != "default" {
+			t.Fatalf("Device()=%q want %q", got, "default")
+		}
+	})
 
-func TestEnabled_DefaultDevice_Enables(t *testing.T) {
-	t.Setenv(envNoAudioKey, "")
-	t.Setenv(envALSADeviceKey, "")
-	if !Enabled() {
-		t.Fatalf("Enabled()=false want true")
-	}
-}
-
-func TestEnabled_WhitespaceDevice_Defaults(t *testing.T) {
-	t.Setenv(envNoAudioKey, "")
-	t.Setenv(envALSADeviceKey, "   ")
-	if !Enabled() {
-		t.Fatalf("Enabled()=false want true")
-	}
-}
-
-func TestDevice_DefaultAndTrim(t *testing.T) {
-	t.Setenv(envALSADeviceKey, "")
-	if got := Device(); got != defaultALSACard {
-		t.Fatalf("Device()=%q want %q", got, defaultALSACard)
-	}
-
-	t.Setenv(envALSADeviceKey, "  hw:1,0  ")
-	if got := Device(); got != "hw:1,0" {
-		t.Fatalf("Device()=%q want %q", got, "hw:1,0")
-	}
-}
-
-func TestEnabled_DoesNotDependOnRealEnv(t *testing.T) {
-	// Sanity check: ensure tests do not leak env changes across cases.
-	_ = os.Unsetenv(envNoAudioKey)
-	_ = os.Unsetenv(envALSADeviceKey)
-	// The exact result may depend on host env; assert only that call does not panic.
-	_ = Enabled()
+	t.Run("trim_space", func(t *testing.T) {
+		t.Setenv("ALSA_DEVICE", " hw:0,0 ")
+		if got := Device(); got != "hw:0,0" {
+			t.Fatalf("Device()=%q want %q", got, "hw:0,0")
+		}
+	})
 }

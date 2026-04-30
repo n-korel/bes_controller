@@ -10,6 +10,7 @@ require (
 	github.com/emiago/sipgox v0.11.0
 	github.com/pion/rtp v1.10.1
 	github.com/rs/zerolog v1.35.1
+	go.uber.org/goleak v1.3.0
 )
 
 replace github.com/emiago/sipgox => ./third_party/sipgox

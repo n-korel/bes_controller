@@ -72,12 +72,13 @@ func (c *DialogUA) ReadInvite(inviteRequest *sip.Request, tx sip.ServerTransacti
 		// NOTE: do not call any here tx FSM related functions as they can cause deadlock
 		state := dtx.LoadState()
 		if state < sip.DialogStateEstablished {
-			// It is mostly canceled if transaction died before answer
-			// NOTE this only happens if we sent provisional and before final response
-			// if err == sip.ErrTransactionCanceled {
-			// 	dtx.endWithCause(sip.ErrTransactionCanceled)
-			// 	return
-			// }
+			// After a final 2xx, the INVITE server transaction eventually terminates
+			// (Timers H/I) while the SIP dialog stays up until BYE. Callers such as sipgox
+			// may send 200 OK via tx.Respond without DialogServerSession.WriteResponse, so FSM
+			// dialog state stays 0 until ReadAck runs — do not cancel dialog.Context() here.
+			if dtx.InviteResponse != nil && dtx.InviteResponse.IsSuccess() {
+				return
+			}
 			dtx.endWithCause(nil)
 		}
 	}) {

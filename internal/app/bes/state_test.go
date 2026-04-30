@@ -98,3 +98,29 @@ func TestBES_KeepaliveWarning_NotTriggeredInUnregistered(t *testing.T) {
 		t.Fatalf("unexpected warn before first ClientReset (UNREGISTERED)")
 	}
 }
+
+func TestKeepalive_NegativeTimeout_DisablesMonitoring(t *testing.T) {
+	timeout := time.Duration(-1) // EC_KEEPALIVE_TIMEOUT=-1
+	now := time.Unix(100, 0)
+
+	type tc struct {
+		name  string
+		state uint32
+		last  int64
+	}
+	cases := []tc{
+		{name: "unregistered_last_zero", state: stateUnregistered, last: 0},
+		{name: "unregistered_last_old", state: stateUnregistered, last: now.Add(-10 * time.Second).UnixNano()},
+		{name: "registered_last_zero", state: stateRegistrationIdle, last: 0},
+		{name: "registered_last_old", state: stateRegistrationIdle, last: now.Add(-10 * time.Second).UnixNano()},
+		{name: "in_call_last_old", state: stateInCall, last: now.Add(-10 * time.Second).UnixNano()},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if warn, warnedAt := keepaliveShouldWarn(c.state, c.last, timeout, now, time.Time{}); warn || !warnedAt.IsZero() {
+				t.Fatalf("warn=%v warnedAt=%v; want warn=false and warnedAt=zero (timeout=%s)", warn, warnedAt, timeout)
+			}
+		})
+	}
+}

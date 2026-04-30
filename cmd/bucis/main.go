@@ -13,6 +13,11 @@ import (
 	"bucis-bes_simulator/pkg/log"
 )
 
+var (
+	notifyContext = signal.NotifyContext
+	appRun        = app.Run
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -35,7 +40,7 @@ func run() error {
 		head2 string
 	)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -52,7 +57,7 @@ func run() error {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	if err := app.Run(ctx, logger, app.Options{
+	if err := appRun(ctx, logger, app.Options{
 		BesBroadcastAddr:    besBroadcast,
 		BesAddrOverride:     besAddrOverride,
 		OpenSIPSIP:          opensipsIP,

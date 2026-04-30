@@ -49,6 +49,10 @@ type Options struct {
 	AutoPressAfterFirstReset bool
 	RunSIP                   RunSIPFunc
 
+	// OnListenPort is used mainly for tests: when ListenPort8890==0,
+	// Run binds to an ephemeral port and reports the actual port here.
+	OnListenPort chan<- int
+
 	OnResetReceived        chan<- struct{}
 	OnAnswerReceived       chan<- *protocol.ClientAnswer
 	OnConversationReceived chan<- string
@@ -76,6 +80,15 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 		return fmt.Errorf("listen udp 8890: %w", err)
 	}
 	defer func() { _ = lconn.Close() }()
+
+	if cfg.EC.ListenPort8890 == 0 && opts.OnListenPort != nil {
+		if la, ok := lconn.LocalAddr().(*net.UDPAddr); ok && la != nil {
+			select {
+			case opts.OnListenPort <- la.Port:
+			default:
+			}
+		}
+	}
 
 	logger.Info("ec started",
 		"listen_8890", cfg.EC.ListenPort8890,
@@ -509,10 +522,16 @@ func (f *besFSM) runSIPAndTrack(ctx context.Context, sipID, newIP string, conver
 			<-sipDoneCh
 			return stateRegistrationIdle
 		case <-f.resetCh:
-			cancelSIP()
-			<-sipDoneCh
-			f.drainPress()
-			return stateRegistrationIdle
+			// ClientReset can happen multiple times while the call is being set up (e.g. user presses again).
+			// It must not cancel SIP; we just drain it to avoid reprocessing stale events.
+		drainReset:
+			for {
+				select {
+				case <-f.resetCh:
+				default:
+					break drainReset
+				}
+			}
 		case <-dialEstablishedCh:
 			f.state.Store(stateInCall)
 

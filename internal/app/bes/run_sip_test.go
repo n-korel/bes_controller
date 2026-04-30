@@ -1,25 +1,19 @@
-package main
+package bes
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	app "bucis-bes_simulator/internal/app/bes"
 	"bucis-bes_simulator/internal/infra/config"
 )
-
-type nopLogger struct{}
-
-func (nopLogger) Info(string, ...any) {}
-func (nopLogger) Warn(string, ...any) {}
 
 func TestRunSIP_ValidationErrors(t *testing.T) {
 	t.Run("invalid SIP_PORT", func(t *testing.T) {
 		t.Setenv("SIP_PORT", "nope")
 		t.Setenv("SIP_USER_BUCIS", "bucis")
 		t.Setenv("SIP_USER_BES", "bes_1")
-		err := app.DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "1", nil, nil)
+		err := DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "1", nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SIP_PORT invalid") {
 			t.Fatalf("expected SIP_PORT invalid error, got %v", err)
 		}
@@ -29,7 +23,7 @@ func TestRunSIP_ValidationErrors(t *testing.T) {
 		t.Setenv("SIP_PORT", "5060")
 		t.Setenv("SIP_USER_BUCIS", "")
 		t.Setenv("SIP_USER_BES", "bes_1")
-		err := app.DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "1", nil, nil)
+		err := DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "1", nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SIP_USER_BUCIS must be set") {
 			t.Fatalf("expected SIP_USER_BUCIS error, got %v", err)
 		}
@@ -39,7 +33,7 @@ func TestRunSIP_ValidationErrors(t *testing.T) {
 		t.Setenv("SIP_PORT", "5060")
 		t.Setenv("SIP_USER_BUCIS", "bucis")
 		t.Setenv("SIP_USER_BES", "")
-		err := app.DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "", nil, nil)
+		err := DefaultRunSIP(context.Background(), nopLogger{}, config.Bes{}, "127.0.0.1", "", nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SIP_USER_BES must be set") {
 			t.Fatalf("expected SIP_USER_BES error, got %v", err)
 		}

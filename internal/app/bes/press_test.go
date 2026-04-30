@@ -123,3 +123,57 @@ func TestDoPress_AnswerDuringRetry(t *testing.T) {
 		t.Fatalf("unexpectedly slow: elapsed=%v", d)
 	}
 }
+
+func TestDoPress_CancelCh_DuringRetryInterval(t *testing.T) {
+	var sendCalls atomic.Int32
+	answers := make(chan answerEvent, 8)
+	cancelCh := make(chan struct{})
+
+	cfg := config.Bes{EC: config.EC{
+		ClientAnswerTimeout:      15 * time.Millisecond,
+		ClientQueryRetryInterval: 200 * time.Millisecond,
+		ClientQueryMaxRetries:    10,
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sendFirst := make(chan struct{}, 1)
+	sendQueryOnce := func() error {
+		n := sendCalls.Add(1)
+		if n == 1 {
+			sendFirst <- struct{}{}
+		}
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := doPress(ctx, nopLogger{}, cfg, sendQueryOnce, answers, cancelCh)
+		done <- err
+	}()
+
+	select {
+	case <-sendFirst:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for first send")
+	}
+
+	// Даем первой попытке гарантированно уйти в timeout,
+	// и попадаем в интервал ожидания между ретраями.
+	time.Sleep(cfg.EC.ClientAnswerTimeout + 10*time.Millisecond)
+	close(cancelCh)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for doPress to stop after cancel")
+	}
+
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 send attempt, got %d", got)
+	}
+}

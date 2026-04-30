@@ -38,10 +38,16 @@ func Start(
 	localPort int,
 	remoteAddr *net.UDPAddr,
 ) (cleanup func(), streamDone <-chan struct{}, err error) {
+	if remoteAddr == nil {
+		return nil, nil, fmt.Errorf("nil remote addr")
+	}
+
 	rx := receiver.New(localPort)
 
 	var pb *audio.Playback
 	var tx *sender.Sender
+	var stopPlayout chan struct{}
+	var playoutDone chan struct{}
 
 	// 1) Playback playout (опционально)
 	if audio.Enabled() {
@@ -49,6 +55,8 @@ func Start(
 		pb, startPBErr = audio.StartPlayback(ctx, audio.Device())
 		if startPBErr == nil {
 			playout := make(chan []int16, 64)
+			stopPlayout = make(chan struct{})
+			playoutDone = make(chan struct{})
 			rx.SetPCMSink(func(pcm []int16) {
 				select {
 				case playout <- pcm:
@@ -56,6 +64,7 @@ func Start(
 				}
 			})
 			go func() {
+				defer close(playoutDone)
 				silence := make([]int16, rtp.SamplesPerFrame)
 
 				// Небольшой prefill буфера вывода снижает шанс underrun на старте.
@@ -83,6 +92,8 @@ func Start(
 				for {
 					select {
 					case <-ctx.Done():
+						return
+					case <-stopPlayout:
 						return
 					case <-t.C:
 						// Берём самый свежий кадр (сбрасывая накопившиеся), чтобы не раздувать задержку.
@@ -140,8 +151,19 @@ func Start(
 	var cleanupOnce sync.Once
 	cleanup = func() {
 		cleanupOnce.Do(func() {
-			// Сначала останавливаем исходящий поток (tx), потом принимающий (rx),
-			// и только в конце закрываем playback.
+			// Важно: playout-горутину останавливаем явно (без требования ctx.Cancel),
+			// и первым делом закрываем playback, чтобы разблокировать возможный WritePCM().
+			if stopPlayout != nil {
+				close(stopPlayout)
+			}
+			if pb != nil {
+				_ = pb.Close()
+			}
+			if playoutDone != nil {
+				<-playoutDone
+			}
+
+			// Дальше останавливаем исходящий поток (tx), потом принимающий (rx).
 			if tx != nil {
 				_ = tx.Close()
 			}
@@ -159,11 +181,15 @@ func Start(
 					)
 				}
 			}
-			if pb != nil {
-				_ = pb.Close()
-			}
 		})
 	}
+
+	// Если caller отменяет ctx, то все фоновые горутины этой сессии должны завершиться,
+	// даже если caller забыл вызвать cleanup().
+	go func() {
+		<-ctx.Done()
+		cleanup()
+	}()
 
 	// 3) RX health loop (для логов)
 	go func() {
@@ -248,9 +274,20 @@ func Start(
 					close(silenceCh)
 					return
 				case <-ticker.C:
+					// Держим в канале "самый свежий" silence-фрейм.
+					// Если TX отстаёт, не даём каналу застыть со старым элементом.
 					select {
 					case silenceCh <- silence:
 					default:
+						// Выталкиваем старый элемент (если он там есть) и пробуем положить новый.
+						select {
+						case <-silenceCh:
+						default:
+						}
+						select {
+						case silenceCh <- silence:
+						default:
+						}
 					}
 				}
 			}
