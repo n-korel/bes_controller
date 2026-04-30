@@ -35,8 +35,7 @@ type EC struct {
 	ClientQueryRetryInterval time.Duration
 	ClientQueryMaxRetries    int
 
-	CallSetupTimeout    time.Duration
-	ConversationTimeout time.Duration
+	CallSetupTimeout time.Duration
 
 	// 0 => без ограничения (по умолчанию, совместимо с текущим поведением).
 	// >0 => sipId = (raw % SipIDModulo), при этом 0 заменяется на SipIDModulo (чтобы sipId не был пустым/нулевым).
@@ -176,10 +175,6 @@ func parseEC() (EC, error) {
 	if err != nil {
 		return EC{}, err
 	}
-	conversationTimeout, err := getEnvDurationDefault("EC_CONVERSATION_TIMEOUT", 30*time.Second)
-	if err != nil {
-		return EC{}, err
-	}
 
 	sipIDModulo, err := getEnvUint64Default("EC_SIPID_MODULO", 0)
 	if err != nil {
@@ -206,8 +201,7 @@ func parseEC() (EC, error) {
 		ClientQueryRetryInterval: retryInterval,
 		ClientQueryMaxRetries:    maxRetries,
 
-		CallSetupTimeout:    callSetupTimeout,
-		ConversationTimeout: conversationTimeout,
+		CallSetupTimeout: callSetupTimeout,
 
 		SipIDModulo: sipIDModulo,
 	}, nil

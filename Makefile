@@ -91,13 +91,13 @@ ci: check
 # =========================
 
 run-bucis: bucis
-	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bucis
+	env_file="$${ENV_FILE:-.env}"; case "$$env_file" in /*) ;; *) env_file="./$$env_file";; esac; set -a; [ -f "$$env_file" ] && . "$$env_file"; set +a; exec ./bin/bucis
 
 run-bes: bes
-	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bes
+	env_file="$${ENV_FILE:-.env}"; case "$$env_file" in /*) ;; *) env_file="./$$env_file";; esac; set -a; [ -f "$$env_file" ] && . "$$env_file"; set +a; exec ./bin/bes
 
 run-bes-press: bes
-	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bes --press
+	env_file="$${ENV_FILE:-.env}"; case "$$env_file" in /*) ;; *) env_file="./$$env_file";; esac; set -a; [ -f "$$env_file" ] && . "$$env_file"; set +a; exec ./bin/bes --press
 
 opensips:
 	-sudo pkill -f "opensips -f deploy/opensips/opensips.cfg"

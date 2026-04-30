@@ -867,7 +867,7 @@ ALSA_DEVICE=Microphone (Realtek(R) Audio)
   - `KeepAlive`: heartbeat от `bucis` (в этом симуляторе IP не меняется)
   - после успешного SIP REGISTER: автоматический SIP INVITE и переход в установление вызова
   - при установке вызова: переход в `IN_CALL`
-  - после SIP BYE (входящий/исходящий) или по `ConversationTimeout`: `IN_CALL → REGISTRATION/IDLE`
+  - после SIP BYE (входящий/исходящий): `IN_CALL → REGISTRATION/IDLE`
   - при получении `ClientReset` в состоянии `IN_CALL`: **игнорировать** (активный разговор не сбрасывать)
 
 Рекомендуемая диаграмма состояний БЭС (нормативная для симулятора):
@@ -885,7 +885,7 @@ stateDiagram-v2
 
     REGISTERED --> CALL_SETUP: SIP REGISTER 200 OK / auto INVITE
     CALL_SETUP --> IN_CALL: 200 OK + ACK (and/or ClientConversation)
-    IN_CALL --> REGISTRATION_IDLE: BYE or ConversationTimeout
+    IN_CALL --> REGISTRATION_IDLE: BYE
 
     IN_CALL --> IN_CALL: ClientReset (ignored)
 ```
@@ -937,14 +937,13 @@ stateDiagram-v2
 - `ClientQueryMaxRetries`: **3** — число повторов `ClientQuery` (включая первую попытку)
 - `SipRegisterTimeout`: **3s** — ожидание успешного REGISTER (если SIP реальный)
 - `CallSetupTimeout`: **10s** — ожидание установки вызова (200 OK/ACK)
-- `ConversationTimeout`: **30s** — максимальная длительность разговора (если не завершено BYE)
 
 Если что-то из этого не нужно в текущей итерации (например, RTP ещё не включён), таймер остаётся в конфиге, но код может его не использовать.
 
 Нормативные уточнения:
 
 - `ClientReset` (от `bucis`) рекомендуется отправлять **сразу при старте**, и затем повторять каждые `ClientResetInterval`.
-- `ConversationTimeout` запускается на стороне `bes` при входе в состояние разговора (после установки SIP-сессии и/или получения `ClientConversation` для своего `sipId`). По истечении таймаута `bes` завершает разговор (SIP BYE) и возвращается в режим ожидания в рамках регистрации.
+- Разговор завершается только по SIP BYE (с любой стороны) или остановке процесса.
 
 ### 11.2. Сетевые дефолты (порты и адреса)
 

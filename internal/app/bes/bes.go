@@ -708,18 +708,11 @@ func DefaultRunSIP(
 	}
 
 afterConversation:
-	conversationTimeout := cfg.EC.ConversationTimeout
-	timer := time.NewTimer(conversationTimeout)
-	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		hangupAndWait()
 		return fmt.Errorf("context done: %w", ctx.Err())
 	case <-dialog.Context().Done():
-		return nil
-	case <-timer.C:
-		hangupAndWait()
-		logger.Info("sip call hangup done", "timeout", conversationTimeout.String())
 		return nil
 	}
 }

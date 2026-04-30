@@ -71,6 +71,7 @@ func Start(
 				}
 				for i := 0; i < prefillFrames; i++ {
 					if err := pb.WritePCM(silence); err != nil {
+						logger.Warn("audio playback stopped", "err", err)
 						return
 					}
 				}
@@ -96,11 +97,13 @@ func Start(
 					play:
 						if last == nil || len(last) != rtp.SamplesPerFrame {
 							if err := pb.WritePCM(silence); err != nil {
+								logger.Warn("audio playback stopped", "err", err)
 								return
 							}
 							continue
 						}
 						if err := pb.WritePCM(last); err != nil {
+							logger.Warn("audio playback stopped", "err", err)
 							return
 						}
 					}

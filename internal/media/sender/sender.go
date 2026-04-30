@@ -174,6 +174,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 	silence := make([]int16, mediarpt.SamplesPerFrame)
 
 	frameTime := start
+	framesCh := frames
 	for {
 		select {
 		case <-ctx.Done():
@@ -194,11 +195,11 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		}
 
 		frame := silence
-		if frames != nil {
+		if framesCh != nil {
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("context done: %w", ctx.Err())
-			case f, ok := <-frames:
+			case f, ok := <-framesCh:
 				if !ok {
 					return nil
 				}
