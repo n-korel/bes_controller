@@ -1,6 +1,8 @@
-package main
+package bes
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -54,6 +56,36 @@ func TestKeepaliveShouldWarn_BoundariesAndRateLimit(t *testing.T) {
 	}
 	if warnedAt != later {
 		t.Fatalf("warnedAt=%v want %v", warnedAt, later)
+	}
+}
+
+func TestKeepaliveShouldWarn_TimeoutZero_DoesNotPanicAndDoesNotWarnInUnregistered(t *testing.T) {
+	now := time.Unix(100, 0)
+	timeout := time.Duration(0)
+
+	cases := []int64{
+		0,
+		1,
+		-1,
+		now.UnixNano(),
+		now.Add(-10 * time.Second).UnixNano(),
+		now.Add(10 * time.Second).UnixNano(),
+		math.MinInt64,
+		math.MaxInt64,
+	}
+
+	for _, last := range cases {
+		t.Run(fmt.Sprintf("last=%d", last), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("panic: %v", r)
+				}
+			}()
+
+			if warn, _ := keepaliveShouldWarn(stateUnregistered, last, timeout, now, time.Time{}); warn {
+				t.Fatalf("unexpected warn in UNREGISTERED with timeout=0, last=%d", last)
+			}
+		})
 	}
 }
 

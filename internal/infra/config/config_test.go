@@ -29,6 +29,7 @@ func TestParseBrs_Defaults(t *testing.T) {
 	t.Setenv("EC_LISTEN_PORT_8890", "")
 	t.Setenv("EC_BUCIS_QUERY_PORT_6710", "")
 	t.Setenv("EC_BUCIS_QUERY_PORT_7777", "")
+	t.Setenv("EC_BES_QUERY_DST_PORT", "")
 	t.Setenv("EC_BUCIS_ADDR", "")
 	t.Setenv("EC_BES_BROADCAST_ADDR", "")
 	t.Setenv("EC_BES_ADDR", "")
@@ -42,8 +43,8 @@ func TestParseBrs_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBes: %v", err)
 	}
-	if cfg.EC.ListenPort8890 != 8890 || cfg.EC.QueryPort6710 != 6710 || cfg.EC.QueryPort7777 != 7777 {
-		t.Fatalf("ports: listen8890=%d q6710=%d q7777=%d", cfg.EC.ListenPort8890, cfg.EC.QueryPort6710, cfg.EC.QueryPort7777)
+	if cfg.EC.ListenPort8890 != 8890 || cfg.EC.QueryPort6710 != 6710 || cfg.EC.QueryPort7777 != 7777 || cfg.EC.BesQueryDstPort != 6710 {
+		t.Fatalf("ports: listen8890=%d q6710=%d q7777=%d besQueryDst=%d", cfg.EC.ListenPort8890, cfg.EC.QueryPort6710, cfg.EC.QueryPort7777, cfg.EC.BesQueryDstPort)
 	}
 	if cfg.EC.BucisAddr != "127.0.0.1" {
 		t.Fatalf("BucisAddr=%q", cfg.EC.BucisAddr)

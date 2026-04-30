@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,7 @@ type EC struct {
 	ListenPort8890   int
 	QueryPort6710    int
 	QueryPort7777    int
+	BesQueryDstPort  int
 	BucisAddr        string
 	BesBroadcastAddr string
 	BesAddrOverride  string
@@ -41,6 +43,9 @@ func ParseBucis() (Bucis, error) {
 	if err := loadDotEnv(".env"); err != nil {
 		return Bucis{}, err
 	}
+	if err := validateRTPPortRangeEnv(); err != nil {
+		return Bucis{}, err
+	}
 	ec, err := parseEC()
 	if err != nil {
 		return Bucis{}, err
@@ -50,6 +55,9 @@ func ParseBucis() (Bucis, error) {
 
 func ParseBes() (Bes, error) {
 	if err := loadDotEnv(".env"); err != nil {
+		return Bes{}, err
+	}
+	if err := validateRTPPortRangeEnv(); err != nil {
 		return Bes{}, err
 	}
 
@@ -92,6 +100,13 @@ func parseEC() (EC, error) {
 	q7777, err := getEnvIntDefault("EC_BUCIS_QUERY_PORT_7777", 7777)
 	if err != nil {
 		return EC{}, err
+	}
+	besQueryDst, err := getEnvIntDefault("EC_BES_QUERY_DST_PORT", q6710)
+	if err != nil {
+		return EC{}, err
+	}
+	if besQueryDst <= 0 || besQueryDst > 65535 {
+		return EC{}, fmt.Errorf("EC_BES_QUERY_DST_PORT must be in range 1..65535")
 	}
 
 	bucisAddr := getEnvStringDefault("EC_BUCIS_ADDR", "127.0.0.1")
@@ -146,6 +161,7 @@ func parseEC() (EC, error) {
 		ListenPort8890:   listen8890,
 		QueryPort6710:    q6710,
 		QueryPort7777:    q7777,
+		BesQueryDstPort:  besQueryDst,
 		BucisAddr:        bucisAddr,
 		BesBroadcastAddr: besBcast,
 		BesAddrOverride:  besOverride,
@@ -186,4 +202,51 @@ func validateIPv4Addr(addr string) error {
 		return fmt.Errorf("not ipv4")
 	}
 	return nil
+}
+
+func validateRTPPortRangeEnv() error {
+	raw, ok := os.LookupEnv("RTP_PORT_RANGE")
+	if !ok {
+		return nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	min, max, ok := parsePortRange(raw)
+	if !ok {
+		return fmt.Errorf("RTP_PORT_RANGE=%q invalid (expected \"min-max\" or single port)", raw)
+	}
+	if min <= 0 || max <= 0 || min > 65535 || max > 65535 || min > max {
+		return fmt.Errorf("RTP_PORT_RANGE=%q invalid (range %d-%d out of bounds)", raw, min, max)
+	}
+	return nil
+}
+
+func parsePortRange(raw string) (min int, max int, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, 0, false
+	}
+	if !strings.Contains(raw, "-") {
+		p, err := strconv.Atoi(raw)
+		if err != nil || p <= 0 || p > 65535 {
+			return 0, 0, false
+		}
+		return p, p, true
+	}
+	parts := strings.Split(raw, "-")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	a, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	b, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	if a <= 0 || b <= 0 || a > 65535 || b > 65535 || a > b {
+		return 0, 0, false
+	}
+	return a, b, true
 }

@@ -78,7 +78,7 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 	logger.Info("ec started",
 		"listen_8890", cfg.EC.ListenPort8890,
 		"bucis_addr", cfg.EC.BucisAddr,
-		"query_port", cfg.EC.QueryPort6710,
+		"query_port", cfg.EC.BesQueryDstPort,
 		"mac", mac,
 	)
 
@@ -186,7 +186,7 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 	}()
 
 	sendQueryOnce := func() error {
-		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.EC.BucisAddr, strconv.Itoa(cfg.EC.QueryPort6710)))
+		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.EC.BucisAddr, strconv.Itoa(cfg.EC.BesQueryDstPort)))
 		if err != nil {
 			return err
 		}
@@ -312,7 +312,7 @@ func doPress(
 		if err := sendQueryOnce(); err != nil {
 			logger.Warn("ec_client_query send failed", "err", err, "attempt", attempt)
 		} else {
-			logger.Info("ec_client_query sent", "attempt", attempt, "to", cfg.EC.BucisAddr, "port", cfg.EC.QueryPort6710)
+			logger.Info("ec_client_query sent", "attempt", attempt, "to", cfg.EC.BucisAddr, "port", cfg.EC.BesQueryDstPort)
 		}
 
 		timeout := time.NewTimer(cfg.EC.ClientAnswerTimeout)
@@ -419,6 +419,8 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 						return ctx.Err()
 					}
 					f.logger.Warn("press failed", "err", err)
+					// Ignore any presses that happened while we were querying.
+					f.drainPress()
 					st = stateRegistrationIdle
 					f.state.Store(st)
 					continue
@@ -622,6 +624,14 @@ func DefaultRunSIP(
 		}
 	}
 
+	stopRTP := func() {}
+	hangupAndWait := func() {
+		hangupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = dialog.Hangup(hangupCtx)
+	}
+	defer func() { stopRTP() }()
+
 	if dialog.MediaSession != nil && dialog.Laddr != nil && dialog.Raddr != nil {
 		lport := dialog.Laddr.Port
 		raddr := dialog.Raddr
@@ -637,12 +647,26 @@ func DefaultRunSIP(
 		dialog.MediaSession.Close()
 
 		rtpCtx, cancelRTP := context.WithCancel(ctx)
-		defer cancelRTP()
 		cleanup, _, rtpErr := rtpsession.Start(rtpCtx, logger, lport, raddr)
-		if cleanup != nil {
-			defer cleanup()
+
+		var stopOnce sync.Once
+		stopRTP = func() {
+			stopOnce.Do(func() {
+				cancelRTP()
+				if cleanup != nil {
+					cleanup()
+				}
+			})
 		}
-		if rtpErr != nil && cleanup == nil {
+		hangupAndWait = func() {
+			hangupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = dialog.Hangup(hangupCtx)
+			stopRTP()
+		}
+
+		if rtpErr != nil {
+			stopRTP()
 			return rtpErr
 		}
 	} else {
@@ -656,7 +680,7 @@ func DefaultRunSIP(
 		for {
 			select {
 			case <-ctx.Done():
-				_ = dialog.Hangup(context.Background())
+				hangupAndWait()
 				return ctx.Err()
 			case <-dialog.Context().Done():
 				return nil
@@ -675,14 +699,16 @@ func DefaultRunSIP(
 
 afterConversation:
 	conversationTimeout := cfg.EC.ConversationTimeout
+	timer := time.NewTimer(conversationTimeout)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		_ = dialog.Hangup(context.Background())
+		hangupAndWait()
 		return ctx.Err()
 	case <-dialog.Context().Done():
 		return nil
-	case <-time.After(conversationTimeout):
-		_ = dialog.Hangup(context.Background())
+	case <-timer.C:
+		hangupAndWait()
 		logger.Info("sip call hangup done", "timeout", conversationTimeout.String())
 		return nil
 	}

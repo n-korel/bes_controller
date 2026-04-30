@@ -1,8 +1,6 @@
 package rtp
 
 import (
-	"os"
-	"sync"
 	"testing"
 
 	pionrtp "github.com/pion/rtp"
@@ -33,9 +31,7 @@ func TestNewPacket_MarshalUnmarshal(t *testing.T) {
 
 func resetPayloadTypeForTest(t *testing.T) {
 	t.Helper()
-	payloadTypeOnce = sync.Once{}
-	payloadTypeG726Val = DefaultPayloadTypeG726
-	_ = os.Unsetenv(envPayloadTypeG726Key)
+	t.Setenv(envPayloadTypeG726Key, "")
 }
 
 func TestPayloadTypeG726_Default(t *testing.T) {
@@ -69,7 +65,7 @@ func TestPayloadTypeG726_Env_Invalid_Ignored(t *testing.T) {
 			if tc != "" {
 				t.Setenv(envPayloadTypeG726Key, tc)
 			} else {
-				_ = os.Unsetenv(envPayloadTypeG726Key)
+				t.Setenv(envPayloadTypeG726Key, "")
 			}
 			if got := PayloadTypeG726(); got != DefaultPayloadTypeG726 {
 				t.Fatalf("PayloadTypeG726()=%d want %d (tc=%q)", got, DefaultPayloadTypeG726, tc)

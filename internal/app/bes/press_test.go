@@ -1,4 +1,4 @@
-package main
+package bes
 
 import (
 	"context"
@@ -10,11 +10,6 @@ import (
 	"bucis-bes_simulator/internal/control/protocol"
 	"bucis-bes_simulator/internal/infra/config"
 )
-
-type nopLogger struct{}
-
-func (nopLogger) Info(string, ...any) {}
-func (nopLogger) Warn(string, ...any) {}
 
 func TestDoPress_SucceedsAfterRetry(t *testing.T) {
 	var sendCalls atomic.Int32
@@ -83,3 +78,4 @@ func TestDoPress_FailsAfterMaxRetries(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+

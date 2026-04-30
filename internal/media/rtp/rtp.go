@@ -21,27 +21,19 @@ const (
 
 const envPayloadTypeG726Key = "RTP_G726_PT"
 
-var (
-	payloadTypeOnce    sync.Once
-	payloadTypeG726Val uint8 = DefaultPayloadTypeG726
-)
-
 func PayloadTypeG726() uint8 {
-	payloadTypeOnce.Do(func() {
-		raw := os.Getenv(envPayloadTypeG726Key)
-		if raw == "" {
-			return
-		}
-		n, err := strconv.Atoi(raw)
-		if err != nil {
-			return
-		}
-		if n != 2 && (n < 96 || n > 127) {
-			return
-		}
-		payloadTypeG726Val = uint8(n)
-	})
-	return payloadTypeG726Val
+	raw := os.Getenv(envPayloadTypeG726Key)
+	if raw == "" {
+		return DefaultPayloadTypeG726
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return DefaultPayloadTypeG726
+	}
+	if n != 2 && (n < 96 || n > 127) {
+		return DefaultPayloadTypeG726
+	}
+	return uint8(n)
 }
 
 func NewPacket(seq uint16, ts uint32, ssrc uint32, payload []byte) *pionrtp.Packet {

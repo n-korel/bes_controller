@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"bucis-bes_simulator/internal/audio"
@@ -38,17 +37,17 @@ type QueryEvent struct {
 }
 
 type AnswerEvent struct {
-	MAC    string
-	SipID  string
-	NewIP  string
-	DstIP  string
+	MAC     string
+	SipID   string
+	NewIP   string
+	DstIP   string
 	DstPort int
 }
 
 type Options struct {
-	BesBroadcastAddr string
-	BesAddrOverride  string
-	OpenSIPSIP       string
+	BesBroadcastAddr    string
+	BesAddrOverride     string
+	OpenSIPSIP          string
 	ClientResetInterval time.Duration
 	KeepAliveInterval   time.Duration
 	Head1IP             string
@@ -65,7 +64,11 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 	}
 	applyECOverrides(&cfg, opts)
 
-	localIP := firstNonLoopbackIPv4()
+	localIP, ok := firstNonLoopbackIPv4()
+	if !ok {
+		logger.Warn("no non-loopback ipv4 found; using loopback fallback", "ip", "127.0.0.1")
+		localIP = "127.0.0.1"
+	}
 	head1 := strings.TrimSpace(opts.Head1IP)
 	head2 := strings.TrimSpace(opts.Head2IP)
 
@@ -114,8 +117,13 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 			return err
 		}
 		defer func() { _ = conn.Close() }()
-		// Linux требует SO_BROADCAST для отправки на broadcast-адрес (иначе EACCES).
-		_ = enableUDPBroadcast(conn)
+		// Важно: broadcast (255.255.255.255) требует отдельной настройки сокета на Linux.
+		// На Windows broadcast для BES отключён: используйте unicast (см. .env.bes.windows / EC_BES_ADDR_OVERRIDE).
+		if isIPv4LimitedBroadcast(raddr.IP) {
+			if err := enableUDPBroadcast(conn); err != nil {
+				return err
+			}
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 		_, err = conn.Write([]byte(payload))
 		return err
@@ -174,7 +182,7 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 	}()
 
 	// SIP (iteration B): register and answer incoming calls via OpenSIPS.
-	_ = initSIP(ctx, logger, &cfg, &sipIDs, localIP, sipDomain, sendTo, &wg)
+	_ = initSIP(ctx, logger, &cfg, sipIDs, localIP, sipDomain, sendTo, &wg)
 
 	listenQuery := func(port int) (*net.UDPConn, error) {
 		return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
@@ -222,7 +230,7 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 				}
 			}
 
-			sipID := sipIDs.getSipID(pkt.Query.MAC)
+			sipID := sipIDs.GetOrCreate(pkt.Query.MAC)
 
 			// Для ClientConversation нам нужен реальный IP источника (кто прислал ClientQuery),
 			// иначе при dev-override адрес будет "просачиваться" дальше и ломать LAN-сценарий.
@@ -232,7 +240,7 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 			if cfg.EC.BesAddrOverride != "" {
 				dst = cfg.EC.BesAddrOverride
 			}
-			sipIDs.setSipIDIP(sipID, senderIP)
+			sipIDs.SetIP(sipID, senderIP)
 			msg := protocol.FormatClientAnswer(opensipsIP, sipID)
 			if err := sendTo(dst, cfg.EC.ListenPort8890, msg); err != nil {
 				logger.Warn("ec_client_answer send failed", "err", err, "dst", dst, "sip_id", sipID, "mac", pkt.Query.MAC)
@@ -278,56 +286,6 @@ func applyECOverrides(cfg *config.Bucis, opts Options) {
 	}
 }
 
-type sipIDState struct {
-	mu  sync.Mutex
-	seq int
-	m   map[string]string // mac -> sipId
-	ip  map[string]string // sipId -> bes ip
-}
-
-func newSipIDState() sipIDState {
-	return sipIDState{m: make(map[string]string), ip: make(map[string]string)}
-}
-
-func (s *sipIDState) getSipID(mac string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.m[mac]; ok {
-		return v
-	}
-	s.seq++
-	v := strconv.Itoa(s.seq)
-	s.m[mac] = v
-	return v
-}
-
-func (s *sipIDState) setSipIDIP(sipID string, besIP string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if sipID == "" || besIP == "" {
-		return
-	}
-	s.ip[sipID] = besIP
-}
-
-func (s *sipIDState) getSipIDIP(sipID string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.ip[sipID]
-	return v, ok
-}
-
-func (s *sipIDState) getSipIDByIP(besIP string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for sipID, ip := range s.ip {
-		if ip == besIP {
-			return sipID, true
-		}
-	}
-	return "", false
-}
-
 func chooseECdst(broadcastAddr, overrideAddr string) string {
 	if overrideAddr != "" {
 		return overrideAddr
@@ -335,25 +293,15 @@ func chooseECdst(broadcastAddr, overrideAddr string) string {
 	return broadcastAddr
 }
 
-func enableUDPBroadcast(conn *net.UDPConn) error {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return err
-	}
-	var serr error
-	if err := raw.Control(func(fd uintptr) {
-		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
-	}); err != nil {
-		return err
-	}
-	return serr
+func isIPv4LimitedBroadcast(ip net.IP) bool {
+	return ip != nil && ip.To4() != nil && ip.Equal(net.IPv4bcast)
 }
 
 func initSIP(
 	ctx context.Context,
 	logger Logger,
 	cfg *config.Bucis,
-	sipIDs *sipIDState,
+	sipIDs SipIDRegistry,
 	localIP string,
 	sipDomain string,
 	sendTo func(ip string, port int, payload string) error,
@@ -532,12 +480,15 @@ func initSIP(
 				callCtx, cancel = context.WithCancel(dialog.Context())
 				defer cancel()
 				cleanup, streamDone, rtpErr := rtpsession.Start(callCtx, logger, lport, raddr)
-				if cleanup != nil {
-					defer cleanup()
-				}
-				if rtpErr != nil && cleanup == nil {
+				if rtpErr != nil {
 					cancel()
-				} else if rtpErr == nil {
+					if cleanup != nil {
+						cleanup()
+					}
+				} else {
+					if cleanup != nil {
+						defer cleanup()
+					}
 					go func() { <-streamDone; cancel() }()
 				}
 			} else {
@@ -559,7 +510,7 @@ func initSIP(
 				ok    bool
 			)
 			if sipID != "" {
-				besIP, ok = sipIDs.getSipIDIP(sipID)
+				besIP, ok = sipIDs.GetIP(sipID)
 			}
 			if !ok && dialog != nil && dialog.InviteRequest != nil {
 				src := strings.TrimSpace(dialog.InviteRequest.Source())
@@ -568,7 +519,7 @@ func initSIP(
 					host = h
 				}
 				if host != "" {
-					if s, found := sipIDs.getSipIDByIP(host); found {
+					if s, found := sipIDs.FindBySenderIP(host); found {
 						sipID = s
 						besIP = host
 						ok = true
@@ -603,10 +554,10 @@ func initSIP(
 	return true
 }
 
-func firstNonLoopbackIPv4() string {
+func firstNonLoopbackIPv4() (ip string, ok bool) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "127.0.0.1"
+		return "", false
 	}
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
@@ -622,11 +573,11 @@ func firstNonLoopbackIPv4() string {
 				continue
 			}
 			if v4 := ipnet.IP.To4(); v4 != nil {
-				return v4.String()
+				return v4.String(), true
 			}
 		}
 	}
-	return "127.0.0.1"
+	return "", false
 }
 
 func ValidateConfigForTests() error {
@@ -636,4 +587,3 @@ func ValidateConfigForTests() error {
 	}
 	return nil
 }
-

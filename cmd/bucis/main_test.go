@@ -145,6 +145,150 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 	}
 }
 
+func TestBUCIS_QueryAnswer_SipID_NotStableAcrossRestarts_NoPersistence(t *testing.T) {
+	q6710 := freeUDPPort(t)
+	q7777 := freeUDPPort(t)
+	answerPort := freeUDPPort(t)
+
+	t.Setenv("LOG_FORMAT", "console")
+	t.Setenv("SIP_DOMAIN", "127.0.0.1")
+
+	t.Setenv("EC_BUCIS_QUERY_PORT_6710", strconv.Itoa(q6710))
+	t.Setenv("EC_BUCIS_QUERY_PORT_7777", strconv.Itoa(q7777))
+	t.Setenv("EC_LISTEN_PORT_8890", strconv.Itoa(answerPort))
+
+	// Без персистентности "между рестартами" sipID для одного MAC не обязан быть стабильным по спеке.
+	// Этот тест фиксирует ожидаемое поведение: после перезапуска bucis выдаётся новый sipID.
+	t.Setenv("EC_BES_BROADCAST_ADDR", "127.0.0.1")
+	t.Setenv("EC_CLIENT_RESET_INTERVAL", "1h")
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "1h")
+
+	// SIP часть должна быть отключена.
+	t.Setenv("SIP_USER_BUCIS", "")
+	t.Setenv("SIP_PASS_BUCIS", "")
+
+	log.Init(os.Getenv("LOG_FORMAT"))
+	logger := log.With("role", "bucis-test")
+
+	answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
+	if err != nil {
+		t.Fatalf("listen answer: %v", err)
+	}
+	defer func() { _ = answerConn.Close() }()
+
+	queryConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen query: %v", err)
+	}
+	defer func() { _ = queryConn.Close() }()
+	queryDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: q6710}
+
+	readAnswerUntil := func(deadline time.Time) (*protocol.ClientAnswer, error) {
+		t.Helper()
+		buf := make([]byte, 2048)
+		for {
+			_ = answerConn.SetReadDeadline(deadline)
+			n, _, err := answerConn.ReadFromUDP(buf)
+			if err != nil {
+				return nil, err
+			}
+			pkt, ok := protocol.Parse(buf[:n])
+			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
+				return pkt.Answer, nil
+			}
+			if time.Now().After(deadline) {
+				return nil, os.ErrDeadlineExceeded
+			}
+		}
+	}
+
+	writeQuery := func(mac string) {
+		t.Helper()
+		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		if _, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery(mac)), queryDst); err != nil {
+			t.Fatalf("write query: %v", err)
+		}
+	}
+
+	queryAndGet := func(mac string) *protocol.ClientAnswer {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for attempt := 0; attempt < 25; attempt++ {
+			writeQuery(mac)
+			ans, err := readAnswerUntil(time.Now().Add(150 * time.Millisecond))
+			if err == nil {
+				return ans
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timeout waiting for ec_client_answer for mac=%q (last err=%v)", mac, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("timeout waiting for ec_client_answer for mac=%q", mac)
+		return nil
+	}
+
+	runOnce := func() (stop func(), done <-chan error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		ch := make(chan error, 1)
+		go func() { ch <- app.Run(ctx, logger, app.Options{}) }()
+		return cancel, ch
+	}
+
+	mac := "AA:BB:CC:DD:EE:31"
+
+	stop1, done1 := runOnce()
+	ans1 := queryAndGet(mac)
+	if ans1.SipID == "" {
+		stop1()
+		t.Fatalf("SipID must not be empty")
+	}
+	stop1()
+	select {
+	case err := <-done1:
+		if err != nil {
+			t.Fatalf("run(1) returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run(1) did not stop after context cancel")
+	}
+
+	// Пробуем вычитать всё, что могло "догнаться" в сокет после остановки первого запуска.
+	{
+		buf := make([]byte, 2048)
+		deadline := time.Now().Add(50 * time.Millisecond)
+		for {
+			_ = answerConn.SetReadDeadline(deadline)
+			if _, _, err := answerConn.ReadFromUDP(buf); err != nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+		}
+	}
+
+	stop2, done2 := runOnce()
+	ans2 := queryAndGet(mac)
+	if ans2.SipID == "" {
+		stop2()
+		t.Fatalf("SipID must not be empty")
+	}
+	stop2()
+	select {
+	case err := <-done2:
+		if err != nil {
+			t.Fatalf("run(2) returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run(2) did not stop after context cancel")
+	}
+
+	if ans2.SipID == ans1.SipID {
+		t.Fatalf("SipID must change across restarts without persistence for same MAC: got %q then %q", ans1.SipID, ans2.SipID)
+	}
+}
+
 func TestBUCIS_Reset_HeadSelection_FlagsOverEnv_AndHead2DefaultsToHead1(t *testing.T) {
 	answerPort := freeUDPPort(t)
 

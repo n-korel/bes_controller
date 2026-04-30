@@ -174,10 +174,27 @@ func Start(
 					logger.Info("rtp health", "received", 0, "last_packet_age", age.String())
 					continue
 				}
+				expected := s.Expected()
+				lost := s.Lost()
+				lossRatio := 0.0
+				if expected > 0 {
+					lossRatio = float64(lost) / float64(expected)
+				}
+				if lossRatio > 0.05 {
+					logger.Warn("rtp loss high",
+						"received", s.Received,
+						"expected", expected,
+						"lost", lost,
+						"loss_ratio", lossRatio,
+						"jitter_ms", s.JitterMs(),
+						"last_packet_age", age.String(),
+					)
+					continue
+				}
 				logger.Info("rtp health",
 					"received", s.Received,
-					"expected", s.Expected(),
-					"lost", s.Lost(),
+					"expected", expected,
+					"lost", lost,
 					"jitter_ms", s.JitterMs(),
 					"last_packet_age", age.String(),
 				)
