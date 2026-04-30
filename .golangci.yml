@@ -1,0 +1,55 @@
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    # базовые
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+
+    # инженерные инварианты
+    - wrapcheck
+    - errorlint
+    - noctx
+    - exhaustive
+
+    # контракт/анти-паттерны
+    - gocritic
+
+    # контроль сложности
+    - gocyclo
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+    gocyclo:
+      min-complexity: 40
+
+    exhaustive:
+      check:
+        - switch
+        - map
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+      - path: _fuzz_test\.go
+        linters:
+          - gocyclo
+      - path: internal/lowlevel/
+        linters:
+          - noctx

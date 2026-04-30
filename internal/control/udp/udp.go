@@ -13,21 +13,28 @@ type Sender struct {
 func NewSender(addr string, port int) (*Sender, error) {
 	raddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", addr, port))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve udp addr %s:%d: %w", addr, port, err)
 	}
 	conn, err := net.DialUDP("udp4", nil, raddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial udp %s:%d: %w", addr, port, err)
 	}
 	return &Sender{conn: conn, raddr: raddr}, nil
 }
 
 func (s *Sender) Close() error {
-	return s.conn.Close()
+	if err := s.conn.Close(); err != nil {
+		return fmt.Errorf("udp close: %w", err)
+	}
+	return nil
 }
 
 func (s *Sender) Send(b []byte) (int, error) {
-	return s.conn.Write(b)
+	n, err := s.conn.Write(b)
+	if err != nil {
+		return n, fmt.Errorf("udp write: %w", err)
+	}
+	return n, nil
 }
 
 type Receiver struct {
@@ -41,7 +48,7 @@ func Join(addr string, port int) (*Receiver, error) {
 	}
 	udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", bindAddr, port))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve udp addr %s:%d: %w", bindAddr, port, err)
 	}
 
 	conn, err := net.ListenUDP("udp4", udpAddr)
@@ -54,12 +61,12 @@ func Join(addr string, port int) (*Receiver, error) {
 				return nil, fmt.Errorf("listen on %s: %w; fallback 0.0.0.0: %w", udpAddr, err, err2)
 			}
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("listen on %s: %w", udpAddr, err)
 		}
 	}
 	if err := conn.SetReadBuffer(1 << 20); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, fmt.Errorf("set udp read buffer: %w", err)
 	}
 	return &Receiver{conn: conn}, nil
 }
@@ -75,10 +82,16 @@ func (r *Receiver) LocalPort() int {
 }
 
 func (r *Receiver) Close() error {
-	return r.conn.Close()
+	if err := r.conn.Close(); err != nil {
+		return fmt.Errorf("udp close: %w", err)
+	}
+	return nil
 }
 
 func (r *Receiver) Read(b []byte) (int, *net.UDPAddr, error) {
-	return r.conn.ReadFromUDP(b)
+	n, addr, err := r.conn.ReadFromUDP(b)
+	if err != nil {
+		return n, addr, fmt.Errorf("udp read: %w", err)
+	}
+	return n, addr, nil
 }
-

@@ -37,6 +37,47 @@ func TestParseClientQuery(t *testing.T) {
 	}
 }
 
+func TestProtocol_SemicolonInMACAddress(t *testing.T) {
+	pkt, ok := Parse([]byte("ec_client_query AA:BB:CC:DD:EE:FF;extra"))
+	if ok {
+		t.Fatalf("expected ok=false, got pkt=%+v", pkt)
+	}
+}
+
+func TestParse_EdgeCases(t *testing.T) {
+	t.Run("client_reset_trailing_tabs", func(t *testing.T) {
+		pkt, ok := Parse([]byte("ec_client_reset 1.2.3.4;5.6.7.8;\t"))
+		if !ok || pkt.Type != ECPacketClientReset || pkt.Reset == nil || pkt.Query != nil || pkt.Answer != nil || pkt.KeepAlive != nil || pkt.Conversation != nil {
+			t.Fatalf("Parse() ok=%v pkt=%+v", ok, pkt)
+		}
+		if got, want := *pkt.Reset, (ClientReset{IPHead1: "1.2.3.4", IPHead2: "5.6.7.8"}); got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+	})
+
+	t.Run("client_answer_very_long_ip", func(t *testing.T) {
+		longIP := strings.Repeat("1", 100)
+		pkt, ok := Parse([]byte("ec_client_answer " + longIP + ";123;"))
+		if !ok || pkt.Type != ECPacketClientAnswer || pkt.Answer == nil || pkt.Reset != nil || pkt.Query != nil || pkt.KeepAlive != nil || pkt.Conversation != nil {
+			t.Fatalf("Parse() ok=%v pkt=%+v", ok, pkt)
+		}
+		if got, want := *pkt.Answer, (ClientAnswer{NewIP: longIP, SipID: "123"}); got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+	})
+
+	t.Run("client_query_unicode_payload", func(t *testing.T) {
+		payload := "АА:ВВ:СС:DD:EE:FF"
+		pkt, ok := Parse([]byte("ec_client_query " + payload))
+		if !ok || pkt.Type != ECPacketClientQuery || pkt.Query == nil || pkt.Reset != nil || pkt.Answer != nil || pkt.KeepAlive != nil || pkt.Conversation != nil {
+			t.Fatalf("Parse() ok=%v pkt=%+v", ok, pkt)
+		}
+		if got, want := pkt.Query.MAC, payload; got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	})
+}
+
 func TestParseClientAnswer(t *testing.T) {
 	line := "ec_client_answer 192.168.5.251;1234;"
 	pkt, ok := Parse([]byte(line))

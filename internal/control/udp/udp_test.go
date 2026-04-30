@@ -28,7 +28,11 @@ func TestJoin_FallbackErrorIncludesBothFailures(t *testing.T) {
 		t.Fatalf("ListenUDP: %v", err)
 	}
 	defer func() { _ = l.Close() }()
-	port := l.LocalAddr().(*net.UDPAddr).Port
+	la, ok := l.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("LocalAddr: want *net.UDPAddr, got %T", l.LocalAddr())
+	}
+	port := la.Port
 
 	_, err = Join("127.0.0.1", port)
 	if err == nil {

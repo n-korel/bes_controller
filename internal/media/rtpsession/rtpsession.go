@@ -3,6 +3,7 @@ package rtpsession
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -29,6 +30,8 @@ type Logger interface {
 //
 // В случае ошибки при создании TX receiver может быть уже запущен: cleanup будет ненулевым,
 // а err вернёт причину. Caller может решить, возвращаться ли или продолжать.
+//
+//nolint:gocyclo // Оркестратор RTP с большим количеством ветвлений по окружению/ошибкам.
 func Start(
 	ctx context.Context,
 	logger Logger,
@@ -127,7 +130,7 @@ func Start(
 		if pb != nil {
 			_ = pb.Close()
 		}
-		return nil, nil, startErr
+		return nil, nil, fmt.Errorf("rtp rx start: %w", startErr)
 	}
 	logger.Info("rtp rx started", "local_port", rx.MediaPort())
 
@@ -212,7 +215,7 @@ func Start(
 	}
 	if err != nil {
 		logger.Warn("rtp tx create failed", "remote_ip", remoteAddr.IP.String(), "remote_port", remoteAddr.Port, "err", err)
-		return cleanup, nil, err
+		return cleanup, nil, fmt.Errorf("rtp tx create: %w", err)
 	}
 	logger.Info("rtp tx started", "remote_ip", remoteAddr.IP.String(), "remote_port", remoteAddr.Port)
 
@@ -237,6 +240,8 @@ func Start(
 			for {
 				select {
 				case <-ctx.Done():
+					// Note: `sender.StreamFramesAt()` treats a closed `frames` channel as a graceful stop (returns nil).
+					// For `silenceCh`, this is the only close path and it happens on `ctx.Done()`.
 					close(silenceCh)
 					return
 				case <-ticker.C:
@@ -260,4 +265,3 @@ func Start(
 
 	return cleanup, doneCh, nil
 }
-

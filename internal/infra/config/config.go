@@ -31,12 +31,16 @@ type EC struct {
 	KeepAliveInterval   time.Duration
 	KeepAliveTimeout    time.Duration
 
-	ClientAnswerTimeout     time.Duration
+	ClientAnswerTimeout      time.Duration
 	ClientQueryRetryInterval time.Duration
 	ClientQueryMaxRetries    int
 
-	CallSetupTimeout     time.Duration
-	ConversationTimeout  time.Duration
+	CallSetupTimeout    time.Duration
+	ConversationTimeout time.Duration
+
+	// 0 => без ограничения (по умолчанию, совместимо с текущим поведением).
+	// >0 => sipId = (raw % SipIDModulo), при этом 0 заменяется на SipIDModulo (чтобы sipId не был пустым/нулевым).
+	SipIDModulo uint64
 }
 
 func ParseBucis() (Bucis, error) {
@@ -88,6 +92,17 @@ func getEnvIntDefault(key string, def int) (int, error) {
 	return def, nil
 }
 
+func getEnvUint64Default(key string, def uint64) (uint64, error) {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a valid unsigned integer: %w", key, err)
+		}
+		return n, nil
+	}
+	return def, nil
+}
+
 func parseEC() (EC, error) {
 	listen8890, err := getEnvIntDefault("EC_LISTEN_PORT_8890", 8890)
 	if err != nil {
@@ -124,9 +139,18 @@ func parseEC() (EC, error) {
 	if err != nil {
 		return EC{}, err
 	}
-	keepAliveTimeout, err := getEnvDurationDefault("EC_KEEPALIVE_TIMEOUT", 0)
-	if err != nil {
-		return EC{}, err
+	keepAliveTimeout := time.Duration(0)
+	if raw, ok := os.LookupEnv("EC_KEEPALIVE_TIMEOUT"); ok && strings.TrimSpace(raw) != "" {
+		raw = strings.TrimSpace(raw)
+		if raw == "-1" {
+			keepAliveTimeout = -1
+		} else {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				return EC{}, fmt.Errorf("EC_KEEPALIVE_TIMEOUT must be a valid duration or -1: %w", err)
+			}
+			keepAliveTimeout = d
+		}
 	}
 	if keepAliveTimeout == 0 {
 		keepAliveTimeout = 3 * keepAliveInterval
@@ -157,6 +181,14 @@ func parseEC() (EC, error) {
 		return EC{}, err
 	}
 
+	sipIDModulo, err := getEnvUint64Default("EC_SIPID_MODULO", 0)
+	if err != nil {
+		return EC{}, err
+	}
+	if sipIDModulo == 1 {
+		return EC{}, fmt.Errorf("EC_SIPID_MODULO must be 0 or >= 2")
+	}
+
 	return EC{
 		ListenPort8890:   listen8890,
 		QueryPort6710:    q6710,
@@ -176,6 +208,8 @@ func parseEC() (EC, error) {
 
 		CallSetupTimeout:    callSetupTimeout,
 		ConversationTimeout: conversationTimeout,
+
+		SipIDModulo: sipIDModulo,
 	}, nil
 }
 

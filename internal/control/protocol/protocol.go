@@ -41,7 +41,7 @@ type ClientAnswer struct {
 
 type KeepAlive struct {
 	OpenSIPSIP string
-	Status    string
+	Status     string
 }
 
 type ClientConversation struct {

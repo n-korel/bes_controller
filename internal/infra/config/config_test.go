@@ -13,15 +13,18 @@ func resetDotEnv(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "config_test")
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	if err := os.Chdir(dir); err != nil {
-		panic(err)
-	}
-	os.Exit(m.Run())
+	code := func() int {
+		dir, err := os.MkdirTemp("", "config_test")
+		if err != nil {
+			panic(err)
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		if err := os.Chdir(dir); err != nil {
+			panic(err)
+		}
+		return m.Run()
+	}()
+	os.Exit(code)
 }
 
 func TestParseBrs_Defaults(t *testing.T) {
@@ -114,6 +117,20 @@ func TestParseBes_KeepAliveTimeout_DefaultsTo3xInterval(t *testing.T) {
 		t.Fatalf("ParseBes: %v", err)
 	}
 	if got, want := cfg.EC.KeepAliveTimeout, 6*time.Second; got != want {
+		t.Fatalf("KeepAliveTimeout=%s want %s", got, want)
+	}
+}
+
+func TestParseBes_KeepAliveTimeout_CanDisableMonitoringWithMinusOne(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "2s")
+	t.Setenv("EC_KEEPALIVE_TIMEOUT", "-1")
+
+	cfg, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+	if got, want := cfg.EC.KeepAliveTimeout, time.Duration(-1); got != want {
 		t.Fatalf("KeepAliveTimeout=%s want %s", got, want)
 	}
 }

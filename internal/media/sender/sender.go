@@ -22,11 +22,11 @@ type Sender struct {
 func New(broadcastAddr string, mediaPort int) (*Sender, error) {
 	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", broadcastAddr, mediaPort))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve udp addr %s:%d: %w", broadcastAddr, mediaPort, err)
 	}
 	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial udp %s:%d: %w", broadcastAddr, mediaPort, err)
 	}
 	return &Sender{conn: conn, addr: addr, owns: true}, nil
 }
@@ -37,7 +37,7 @@ func NewTo(addr *net.UDPAddr) (*Sender, error) {
 	}
 	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial udp %s: %w", addr.String(), err)
 	}
 	return &Sender{conn: conn, addr: addr, owns: true}, nil
 }
@@ -57,15 +57,26 @@ func (s *Sender) Close() error {
 	if !s.owns {
 		return nil
 	}
-	return s.conn.Close()
+	if err := s.conn.Close(); err != nil {
+		return fmt.Errorf("udp close: %w", err)
+	}
+	return nil
 }
 
 func (s *Sender) write(raw []byte) (int, error) {
 	// Если conn создан через DialUDP, он "connected" и WriteTo* на Linux вернёт ошибку.
 	if s.conn.RemoteAddr() != nil {
-		return s.conn.Write(raw)
+		n, err := s.conn.Write(raw)
+		if err != nil {
+			return n, fmt.Errorf("udp write: %w", err)
+		}
+		return n, nil
 	}
-	return s.conn.WriteToUDP(raw, s.addr)
+	n, err := s.conn.WriteToUDP(raw, s.addr)
+	if err != nil {
+		return n, fmt.Errorf("udp write to %s: %w", s.addr.String(), err)
+	}
+	return n, nil
 }
 
 func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
@@ -79,7 +90,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context done: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -93,7 +104,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 	for i := 0; i < len(pcm); i += mediarpt.SamplesPerFrame {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context done: %w", ctx.Err())
 		default:
 		}
 
@@ -104,7 +115,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 				if !t.Stop() {
 					<-t.C
 				}
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case <-t.C:
 			}
 		}
@@ -121,19 +132,19 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		pkt := mediarpt.NewPacket(seq, rtpTS, ssrc, payload)
 		raw, err := pkt.Marshal()
 		if err != nil {
-			return err
+			return fmt.Errorf("rtp marshal: %w", err)
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("context done: %w", err)
 		}
 		if s.closed.Load() {
 			return net.ErrClosed
 		}
 		if _, err := s.write(raw); err != nil {
 			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			}
-			return err
+			return fmt.Errorf("udp write: %w", err)
 		}
 
 		seq++
@@ -151,7 +162,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context done: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -166,7 +177,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context done: %w", ctx.Err())
 		default:
 		}
 
@@ -177,7 +188,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 				if !t.Stop() {
 					<-t.C
 				}
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case <-t.C:
 			}
 		}
@@ -186,7 +197,7 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		if frames != nil {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case f, ok := <-frames:
 				if !ok {
 					return nil
@@ -211,19 +222,19 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 		pkt := mediarpt.NewPacket(seq, rtpTS, ssrc, payload)
 		raw, err := pkt.Marshal()
 		if err != nil {
-			return err
+			return fmt.Errorf("rtp marshal: %w", err)
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("context done: %w", err)
 		}
 		if s.closed.Load() {
 			return net.ErrClosed
 		}
 		if _, err := s.write(raw); err != nil {
 			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			}
-			return err
+			return fmt.Errorf("udp write: %w", err)
 		}
 
 		seq++

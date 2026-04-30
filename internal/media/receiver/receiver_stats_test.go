@@ -103,4 +103,3 @@ func TestReceiver_StartStop_IdempotentScenarios(t *testing.T) {
 		t.Fatalf("Stop second time: %v", err)
 	}
 }
-

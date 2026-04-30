@@ -2,6 +2,8 @@ module bucis-bes_simulator
 
 go 1.23.0
 
+toolchain go1.25.9
+
 require (
 	github.com/emiago/media v0.2.0
 	github.com/emiago/sipgo v1.3.1

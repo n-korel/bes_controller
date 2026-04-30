@@ -18,4 +18,3 @@ func Init(format string) {
 func With(args ...any) *slog.Logger {
 	return slog.Default().With(args...)
 }
-

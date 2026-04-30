@@ -35,7 +35,7 @@ func TestDoPress_SucceedsAfterRetry(t *testing.T) {
 		return nil
 	}
 
-	sipID, newIP, err := doPress(ctx, nopLogger{}, cfg, sendQueryOnce, answers)
+	sipID, newIP, err := doPress(ctx, nopLogger{}, cfg, sendQueryOnce, answers, nil)
 	if err != nil {
 		t.Fatalf("doPress error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestDoPress_StopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := doPress(ctx, nopLogger{}, cfg, func() error { return nil }, answers)
+	_, _, err := doPress(ctx, nopLogger{}, cfg, func() error { return nil }, answers, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -73,9 +73,53 @@ func TestDoPress_FailsAfterMaxRetries(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := doPress(ctx, nopLogger{}, cfg, func() error { return nil }, answers)
+	_, _, err := doPress(ctx, nopLogger{}, cfg, func() error { return nil }, answers, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
 }
 
+func TestDoPress_AnswerDuringRetry(t *testing.T) {
+	var sendCalls atomic.Int32
+	answers := make(chan answerEvent, 8)
+
+	cfg := config.Bes{EC: config.EC{
+		ClientAnswerTimeout:      20 * time.Millisecond,
+		ClientQueryRetryInterval: 120 * time.Millisecond,
+		ClientQueryMaxRetries:    3,
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	sendQueryOnce := func() error {
+		n := sendCalls.Add(1)
+		if n == 1 {
+			// Ответ приходит уже после timeout первой попытки,
+			// но во время ожидания retryInterval (между ретраями).
+			go func() {
+				time.Sleep(40 * time.Millisecond)
+				answers <- answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "77"}}
+			}()
+		}
+		return nil
+	}
+
+	sipID, newIP, err := doPress(ctx, nopLogger{}, cfg, sendQueryOnce, answers, nil)
+	if err != nil {
+		t.Fatalf("doPress error: %v", err)
+	}
+	if sipID != "77" || newIP != "10.0.0.1" {
+		t.Fatalf("got sipID=%q newIP=%q", sipID, newIP)
+	}
+	if got := sendCalls.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 send attempts, got %d", got)
+	}
+	if d := time.Since(start); d < cfg.EC.ClientQueryRetryInterval {
+		t.Fatalf("expected to wait at least retryInterval, elapsed=%v retryInterval=%v", d, cfg.EC.ClientQueryRetryInterval)
+	}
+	if d := time.Since(start); d > cfg.EC.ClientQueryRetryInterval+cfg.EC.ClientAnswerTimeout+150*time.Millisecond {
+		t.Fatalf("unexpectedly slow: elapsed=%v", d)
+	}
+}

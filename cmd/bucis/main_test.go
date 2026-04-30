@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -19,7 +20,12 @@ func freeUDPPort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("ListenUDP: %v", err)
 	}
-	p := c.LocalAddr().(*net.UDPAddr).Port
+	la, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = c.Close()
+		t.Fatalf("LocalAddr: want *net.UDPAddr, got %T", c.LocalAddr())
+	}
+	p := la.Port
 	_ = c.Close()
 	return p
 }
@@ -78,7 +84,7 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 			_ = answerConn.SetReadDeadline(deadline)
 			n, _, err := answerConn.ReadFromUDP(buf)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("read answer: %w", err)
 			}
 			pkt, ok := protocol.Parse(buf[:n])
 			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
@@ -190,7 +196,7 @@ func TestBUCIS_QueryAnswer_SipID_NotStableAcrossRestarts_NoPersistence(t *testin
 			_ = answerConn.SetReadDeadline(deadline)
 			n, _, err := answerConn.ReadFromUDP(buf)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("read answer: %w", err)
 			}
 			pkt, ok := protocol.Parse(buf[:n])
 			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
@@ -421,7 +427,7 @@ func TestBUCIS_Answer_NewIP_PriorityFlagsOverEnv(t *testing.T) {
 			_ = answerConn.SetReadDeadline(deadline)
 			n, _, err := answerConn.ReadFromUDP(buf)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("read answer: %w", err)
 			}
 			pkt, ok := protocol.Parse(buf[:n])
 			if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {

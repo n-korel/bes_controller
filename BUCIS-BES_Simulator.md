@@ -74,7 +74,7 @@
   - `EC_BES_ADDR` (unicast override)
   - `EC_CLIENT_RESET_INTERVAL` (default `5s`)
   - `EC_KEEPALIVE_INTERVAL` (default `2s`)
-  - `EC_KEEPALIVE_TIMEOUT` (default: `3 * EC_KEEPALIVE_INTERVAL`; `0`/unset does **not** disable, it enables the default rule)
+  - `EC_KEEPALIVE_TIMEOUT` (default: `3 * EC_KEEPALIVE_INTERVAL`; `0`/unset does **not** disable, it enables the default rule; `-1` disables keepalive monitoring)
   - `EC_CLIENT_ANSWER_TIMEOUT` (default `3s`)
   - `EC_CLIENT_QUERY_RETRY_INTERVAL` (default `1s`)
   - `EC_CLIENT_QUERY_MAX_RETRIES` (default `3`)
@@ -974,6 +974,7 @@ stateDiagram-v2
 - при первом `ClientQuery` для нового MAC назначается новый `sipId` (например, автоинкремент)
 - при повторном `ClientQuery` для того же MAC выдаётся тот же `sipId`
 - `sipId` в wire отправляется как **decimal integer string** (`"1"`, `"2"`, ...), не UUID/hex.
+- Для совместимости с реальными прошивками, где `sipId` может быть 16/32-битным числом, можно включить ограничение диапазона через `EC_SIPID_MODULO` (см. `.env`).
 
 Стабильность между рестартами не требуется (если не оговорено иначе).
 

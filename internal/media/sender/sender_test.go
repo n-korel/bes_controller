@@ -13,6 +13,16 @@ import (
 	pionrtp "github.com/pion/rtp"
 )
 
+func localUDPAddr(t *testing.T, c *net.UDPConn) *net.UDPAddr {
+	t.Helper()
+	la := c.LocalAddr()
+	ua, ok := la.(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("LocalAddr: want *net.UDPAddr, got %T", la)
+	}
+	return ua
+}
+
 func TestSender_write_UsesWriteWhenConnected(t *testing.T) {
 	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -20,7 +30,7 @@ func TestSender_write_UsesWriteWhenConnected(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	s, err := NewTo(localUDPAddr(t, srv))
 	if err != nil {
 		t.Fatalf("NewTo: %v", err)
 	}
@@ -55,7 +65,7 @@ func TestSender_write_UsesWriteToUDPWhenNotConnected(t *testing.T) {
 	}
 	defer func() { _ = lconn.Close() }()
 
-	s, err := NewFromConn(lconn, srv.LocalAddr().(*net.UDPAddr))
+	s, err := NewFromConn(lconn, localUDPAddr(t, srv))
 	if err != nil {
 		t.Fatalf("NewFromConn: %v", err)
 	}
@@ -84,7 +94,7 @@ func TestSender_StreamAt_RespectsCtxDuringInitialWait(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	s, err := NewTo(localUDPAddr(t, srv))
 	if err != nil {
 		t.Fatalf("NewTo: %v", err)
 	}
@@ -107,7 +117,7 @@ func TestSender_StreamFramesAt_CloseDuringStreamReturnsErrClosed(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	s, err := NewTo(localUDPAddr(t, srv))
 	if err != nil {
 		t.Fatalf("NewTo: %v", err)
 	}
@@ -137,7 +147,7 @@ func TestSender_StreamFramesAt_PadsAndTrimsFrames(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 
-	s, err := NewTo(srv.LocalAddr().(*net.UDPAddr))
+	s, err := NewTo(localUDPAddr(t, srv))
 	if err != nil {
 		t.Fatalf("NewTo: %v", err)
 	}
@@ -256,7 +266,7 @@ func TestStreamFramesAt_NilFrameStopsWithoutSending(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	port := localUDPAddr(t, conn).Port
 	s, err := New("127.0.0.1", port)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -286,7 +296,7 @@ func TestStreamFramesAt_PadsAndTruncatesTo160Samples(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	port := localUDPAddr(t, conn).Port
 	s, err := New("127.0.0.1", port)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -294,9 +304,9 @@ func TestStreamFramesAt_PadsAndTruncatesTo160Samples(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	frames := make(chan []int16, 3)
-	frames <- make([]int16, 10)   // padded
-	frames <- make([]int16, 200)  // truncated
-	frames <- nil                 // stop
+	frames <- make([]int16, 10)  // padded
+	frames <- make([]int16, 200) // truncated
+	frames <- nil                // stop
 	close(frames)
 
 	ctx := context.Background()
@@ -344,7 +354,7 @@ func TestStreamFramesAt_CancelDuringStreaming_ReturnsContextCanceled(t *testing.
 	}
 	defer func() { _ = conn.Close() }()
 
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	port := localUDPAddr(t, conn).Port
 	s, err := New("127.0.0.1", port)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -391,7 +401,7 @@ func TestStreamFramesAt_FramesNil_SendsSilenceUntilCancel(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	port := localUDPAddr(t, conn).Port
 	s, err := New("127.0.0.1", port)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -440,7 +450,7 @@ func TestNewFromConn_UsesWriteToUDP_WhenNotConnected(t *testing.T) {
 		t.Fatalf("ListenUDP: %v", err)
 	}
 	defer func() { _ = recv.Close() }()
-	recvPort := recv.LocalAddr().(*net.UDPAddr).Port
+	recvPort := localUDPAddr(t, recv).Port
 
 	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -483,7 +493,7 @@ func TestStreamAt_CancelDuringStreaming_ReturnsContextCanceled(t *testing.T) {
 	}
 	defer func() { _ = recv.Close() }()
 
-	port := recv.LocalAddr().(*net.UDPAddr).Port
+	port := localUDPAddr(t, recv).Port
 	s, err := New("127.0.0.1", port)
 	if err != nil {
 		t.Fatalf("New: %v", err)

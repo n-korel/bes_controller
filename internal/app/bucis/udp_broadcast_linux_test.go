@@ -31,4 +31,3 @@ func TestBUCIS_BroadcastSend_DoesNotFailWithEACCES(t *testing.T) {
 		t.Fatalf("broadcast write returned EACCES: %v", err)
 	}
 }
-

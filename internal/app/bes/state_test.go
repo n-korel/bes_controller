@@ -89,3 +89,12 @@ func TestKeepaliveShouldWarn_TimeoutZero_DoesNotPanicAndDoesNotWarnInUnregistere
 	}
 }
 
+func TestBES_KeepaliveWarning_NotTriggeredInUnregistered(t *testing.T) {
+	timeout := 2 * time.Second
+	now := time.Unix(100, 0)
+	last := now.Add(-10 * time.Second).UnixNano()
+
+	if warn, _ := keepaliveShouldWarn(stateUnregistered, last, timeout, now, time.Time{}); warn {
+		t.Fatalf("unexpected warn before first ClientReset (UNREGISTERED)")
+	}
+}

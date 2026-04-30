@@ -34,9 +34,9 @@ func TestFSM_PressIgnoredWhileQuerying(t *testing.T) {
 		logger: nopLogger{},
 		state:  &st,
 
-		resetCh:                 resetCh,
-		pressCh:                 pressCh,
-		answers:                 answers,
+		resetCh:                  resetCh,
+		pressCh:                  pressCh,
+		answers:                  answers,
 		autoPressAfterFirstReset: false,
 		sendQueryOnce: func() error {
 			sendCalls.Add(1)
@@ -135,12 +135,12 @@ func TestFSM_ClientResetCancelsCallSetup(t *testing.T) {
 	finishCh := make(chan struct{})
 
 	fsm := besFSM{
-		cfg:                    cfg,
-		logger:                 nopLogger{},
-		state:                  &st,
-		resetCh:                resetCh,
-		pressCh:                pressCh,
-		answers:                answers,
+		cfg:                      cfg,
+		logger:                   nopLogger{},
+		state:                    &st,
+		resetCh:                  resetCh,
+		pressCh:                  pressCh,
+		answers:                  answers,
 		autoPressAfterFirstReset: true,
 		sendQueryOnce: func() error {
 			return nil
@@ -245,12 +245,12 @@ func TestFSM_ClientResetIgnoredInCall(t *testing.T) {
 	finishCh := make(chan struct{})
 
 	fsm := besFSM{
-		cfg:                    cfg,
-		logger:                 nopLogger{},
-		state:                  &st,
-		resetCh:                resetCh,
-		pressCh:                pressCh,
-		answers:                answers,
+		cfg:                      cfg,
+		logger:                   nopLogger{},
+		state:                    &st,
+		resetCh:                  resetCh,
+		pressCh:                  pressCh,
+		answers:                  answers,
 		autoPressAfterFirstReset: true,
 		sendQueryOnce: func() error {
 			return nil
@@ -345,4 +345,3 @@ func TestFSM_ClientResetIgnoredInCall(t *testing.T) {
 	cancel()
 	<-done
 }
-

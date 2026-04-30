@@ -375,7 +375,7 @@ func TestWrapSequenceIncreasesCycles(t *testing.T) {
 	r.updateStats(65000, 1500)
 
 	r.updateStats(100, 2000)
-	
+
 	r.updateStats(60500, 1600)
 
 	if got, want := r.stats.Cycles, uint32(1<<16); got != want {
@@ -599,4 +599,3 @@ func TestWrapSequence_DoesNotIncreaseCyclesIfGapTooLarge(t *testing.T) {
 		t.Fatalf("MaxSeq=%d want %d", got, want)
 	}
 }
-

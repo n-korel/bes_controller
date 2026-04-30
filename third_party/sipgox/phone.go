@@ -773,6 +773,18 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 	// Буфер 1: диалог можно отдать вызывающему коду сразу после 200 OK,
 	// не дожидаясь ACK, чтобы он успел стартовать RTP (в симуляторе это важно).
 	waitDialog := make(chan *DialogServerSession, 1)
+	var delivered sync.Once
+	deliverDialog := func(ds *DialogServerSession) {
+		if ds == nil {
+			return
+		}
+		delivered.Do(func() {
+			select {
+			case waitDialog <- ds:
+			default:
+			}
+		})
+	}
 	var d *DialogServerSession
 
 	server, err := sipgo.NewServer(p.UA)
@@ -999,6 +1011,7 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 
 				d = &DialogServerSession{
 					DialogServerSession: dialog,
+					onClose:             stopAnswer,
 				}
 				select {
 				case <-tx.Done():
@@ -1009,6 +1022,8 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 					return ctx.Err()
 				}
 
+				// В ветке AnswerCode мы всё ещё ждём ACK перед отдачей диалога,
+				// но отправка делается один раз.
 				select {
 				case waitDialog <- d:
 				case <-ctx.Done():
@@ -1084,6 +1099,7 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 			d = &DialogServerSession{
 				DialogServerSession: dialog,
 				MediaSession:        msess,
+				onClose:             stopAnswer,
 			}
 			dialog.InviteResponse = res
 
@@ -1095,10 +1111,7 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 			p.logSipResponse(&log, res)
 
 			// Отдаём диалог сразу после 200 OK. ACK всё равно обработается в OnAck.
-			select {
-			case waitDialog <- d:
-			default:
-			}
+			deliverDialog(d)
 			return nil
 		}()
 
@@ -1111,7 +1124,6 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 	})
 
 	server.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
-		// Диалог может уже быть отдан вызывающему коду сразу после 200 OK.
 		if d == nil {
 			return
 		}
@@ -1120,12 +1132,6 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 			exitError(fmt.Errorf("dialog ACK err: %w", err))
 			stopAnswer()
 			return
-		}
-
-		// Если диалог уже был отправлен после 200 OK, повторно не блокируемся.
-		select {
-		case waitDialog <- d:
-		default:
 		}
 	})
 
@@ -1155,7 +1161,6 @@ func (p *Phone) answer(ansCtx context.Context, opts AnswerOptions) (*DialogServe
 	log.Info().Msg("Waiting for INVITE...")
 	select {
 	case d = <-waitDialog:
-		d.onClose = stopAnswer
 		return d, nil
 	case <-ctx.Done():
 		if ansCtx.Err() != nil {

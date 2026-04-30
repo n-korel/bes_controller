@@ -9,4 +9,3 @@ func enableUDPBroadcast(_ *net.UDPConn) error {
 	// а если нет — дадим упасть на Write с понятной сетевой ошибкой.
 	return nil
 }
-

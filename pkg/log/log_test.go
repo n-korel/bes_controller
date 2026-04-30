@@ -89,4 +89,3 @@ func TestWith_ReturnsLogger(t *testing.T) {
 	}
 	_ = l
 }
-

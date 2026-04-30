@@ -16,15 +16,16 @@ type SipIDRegistry interface {
 }
 
 type sipIDState struct {
-	mu  sync.RWMutex
-	seq int
+	mu   sync.RWMutex
+	seq  int
 	boot uint64
-	m   map[string]string // mac -> sipId
-	ip  map[string]string // sipId -> bes ip (последний известный)
-	ipr map[string]string // bes ip -> sipId (последний ClientQuery с этого IP)
+	mod  uint64
+	m    map[string]string // mac -> sipId
+	ip   map[string]string // sipId -> bes ip (последний известный)
+	ipr  map[string]string // bes ip -> sipId (последний ClientQuery с этого IP)
 }
 
-func newSipIDState() *sipIDState {
+func newSipIDState(modulo uint64) *sipIDState {
 	boot := uint64(time.Now().UnixNano())
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err == nil {
@@ -32,14 +33,19 @@ func newSipIDState() *sipIDState {
 	}
 	return &sipIDState{
 		boot: boot,
-		m:   make(map[string]string),
-		ip:  make(map[string]string),
-		ipr: make(map[string]string),
+		mod:  modulo,
+		m:    make(map[string]string),
+		ip:   make(map[string]string),
+		ipr:  make(map[string]string),
 	}
 }
 
 func (s *sipIDState) GetOrCreate(mac string) string {
-	mac = strings.ToUpper(strings.TrimSpace(mac))
+	mac = strings.TrimSpace(mac)
+	// Важно: `strings.ToUpper(x)` не гарантирует, что `ToUpper(ToLower(x)) == ToUpper(x)` для всего Unicode
+	// (пример: U+03F4 "ϴ"). А тест/прод-код могут получать MAC уже прогнанный через ToUpper/ToLower.
+	// Поэтому делаем двухшаговую нормализацию: сначала ToLower, затем ToUpper — так ключ стабилен.
+	mac = strings.ToUpper(strings.ToLower(mac))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if v, ok := s.m[mac]; ok {
@@ -48,7 +54,14 @@ func (s *sipIDState) GetOrCreate(mac string) string {
 	s.seq++
 	// По `docs/BUCIS_review.md`: sipId должен быть decimal integer string.
 	// Поэтому делаем boot-уникальный числовой префикс через большой оффсет.
-	v := strconv.FormatUint(s.boot*1_000_000+uint64(s.seq), 10)
+	raw := s.boot*1_000_000 + uint64(s.seq)
+	if s.mod >= 2 {
+		raw %= s.mod
+		if raw == 0 {
+			raw = s.mod
+		}
+	}
+	v := strconv.FormatUint(raw, 10)
 	s.m[mac] = v
 	return v
 }
@@ -86,4 +99,3 @@ func (s *sipIDState) FindBySenderIP(ip string) (string, bool) {
 	v, ok := s.ipr[ip]
 	return v, ok
 }
-

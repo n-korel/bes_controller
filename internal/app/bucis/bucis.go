@@ -2,6 +2,7 @@ package bucis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -57,10 +58,19 @@ type Options struct {
 	OnAnswerSent    chan<- AnswerEvent
 }
 
+type BUCIS struct {
+	logger    Logger
+	cfg       *config.Bucis
+	sipIDs    SipIDRegistry
+	localIP   string
+	sipDomain string
+	sendTo    func(ip string, port int, payload string) error
+}
+
 func Run(ctx context.Context, logger Logger, opts Options) error {
 	cfg, err := config.ParseBucis()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse bucis config: %w", err)
 	}
 	applyECOverrides(&cfg, opts)
 
@@ -99,34 +109,38 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 		"listen_7777", cfg.EC.QueryPort7777,
 		"send_8890_broadcast", cfg.EC.BesBroadcastAddr,
 		"send_8890_override", cfg.EC.BesAddrOverride,
+		"sip_id_modulo", cfg.EC.SipIDModulo,
 		"sip_domain", sipDomain,
 		"opensips_ip", opensipsIP,
 		"reset_interval", cfg.EC.ClientResetInterval.String(),
 		"keepalive_interval", cfg.EC.KeepAliveInterval.String(),
 	)
 
-	sipIDs := newSipIDState()
+	sipIDs := newSipIDState(cfg.EC.SipIDModulo)
 
 	sendTo := func(ip string, port int, payload string) error {
 		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(ip, strconv.Itoa(port)))
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve udp addr %s:%d: %w", ip, port, err)
 		}
 		conn, err := net.DialUDP("udp4", nil, raddr)
 		if err != nil {
-			return err
+			return fmt.Errorf("dial udp %s:%d: %w", ip, port, err)
 		}
 		defer func() { _ = conn.Close() }()
 		// Важно: broadcast (255.255.255.255) требует отдельной настройки сокета на Linux.
 		// На Windows broadcast для BES отключён: используйте unicast (см. .env.bes.windows / EC_BES_ADDR_OVERRIDE).
 		if isIPv4LimitedBroadcast(raddr.IP) {
 			if err := enableUDPBroadcast(conn); err != nil {
-				return err
+				return fmt.Errorf("enable udp broadcast: %w", err)
 			}
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 		_, err = conn.Write([]byte(payload))
-		return err
+		if err != nil {
+			return fmt.Errorf("udp write %s:%d: %w", ip, port, err)
+		}
+		return nil
 	}
 
 	sendReset := func() {
@@ -182,19 +196,27 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 	}()
 
 	// SIP (iteration B): register and answer incoming calls via OpenSIPS.
-	_ = initSIP(ctx, logger, &cfg, sipIDs, localIP, sipDomain, sendTo, &wg)
+	b := &BUCIS{
+		logger:    logger,
+		cfg:       &cfg,
+		sipIDs:    sipIDs,
+		localIP:   localIP,
+		sipDomain: sipDomain,
+		sendTo:    sendTo,
+	}
+	_ = b.initSIP(ctx, &wg)
 
 	listenQuery := func(port int) (*net.UDPConn, error) {
 		return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
 	}
 	c6710, err := listenQuery(cfg.EC.QueryPort6710)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen query port %d: %w", cfg.EC.QueryPort6710, err)
 	}
 	defer func() { _ = c6710.Close() }()
 	c7777, err := listenQuery(cfg.EC.QueryPort7777)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen query port %d: %w", cfg.EC.QueryPort7777, err)
 	}
 	defer func() { _ = c7777.Close() }()
 
@@ -204,7 +226,8 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			n, raddr, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
 					if ctx.Err() != nil {
 						return
 					}
@@ -232,15 +255,15 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 
 			sipID := sipIDs.GetOrCreate(pkt.Query.MAC)
 
-			// Для ClientConversation нам нужен реальный IP источника (кто прислал ClientQuery),
-			// иначе при dev-override адрес будет "просачиваться" дальше и ломать LAN-сценарий.
 			senderIP := raddr.IP.String()
 
 			dst := senderIP
 			if cfg.EC.BesAddrOverride != "" {
 				dst = cfg.EC.BesAddrOverride
 			}
-			sipIDs.SetIP(sipID, senderIP)
+			// В реестре храним адрес назначения для последующих ClientConversation.
+			// Если включен EC_BES_ADDR_OVERRIDE, то и ClientAnswer, и ClientConversation должны идти на override.
+			sipIDs.SetIP(sipID, dst)
 			msg := protocol.FormatClientAnswer(opensipsIP, sipID)
 			if err := sendTo(dst, cfg.EC.ListenPort8890, msg); err != nil {
 				logger.Warn("ec_client_answer send failed", "err", err, "dst", dst, "sip_id", sipID, "mac", pkt.Query.MAC)
@@ -297,20 +320,12 @@ func isIPv4LimitedBroadcast(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && ip.Equal(net.IPv4bcast)
 }
 
-func initSIP(
-	ctx context.Context,
-	logger Logger,
-	cfg *config.Bucis,
-	sipIDs SipIDRegistry,
-	localIP string,
-	sipDomain string,
-	sendTo func(ip string, port int, payload string) error,
-	wg *sync.WaitGroup,
-) bool {
+//nolint:gocyclo // Инициализация SIP + регистрация + Answer loop: держим линейно, чтобы легче сопровождать.
+func (b *BUCIS) initSIP(ctx context.Context, wg *sync.WaitGroup) bool {
 	bucisUser := strings.TrimSpace(os.Getenv("SIP_USER_BUCIS"))
 	bucisPass := os.Getenv("SIP_PASS_BUCIS")
 	if bucisUser == "" {
-		logger.Info("sip disabled: SIP_USER_BUCIS not set")
+		b.logger.Info("sip disabled: SIP_USER_BUCIS not set")
 		return false
 	}
 
@@ -326,7 +341,7 @@ func initSIP(
 		if d, err := time.ParseDuration(v); err == nil {
 			registerTotalTimeout = d
 		} else {
-			logger.Warn("sip register: invalid SIP_REGISTER_TIMEOUT, using default", "value", v, "err", err, "default", registerTotalTimeout.String())
+			b.logger.Warn("sip register: invalid SIP_REGISTER_TIMEOUT, using default", "value", v, "err", err, "default", registerTotalTimeout.String())
 		}
 	}
 	if registerTotalTimeout <= 0 {
@@ -335,39 +350,47 @@ func initSIP(
 
 	ua, err := sipgo.NewUA(
 		sipgo.WithUserAgent(bucisUser),
-		sipgo.WithUserAgentHostname(sipDomain),
+		sipgo.WithUserAgentHostname(b.sipDomain),
 	)
 	if err != nil {
-		logger.Warn("sip ua init failed", "err", err)
+		b.logger.Warn("sip ua init failed", "err", err)
 		return false
 	}
 
-	remote := sip.Uri{Host: sipDomain, Port: sipPort}
+	remote := sip.Uri{Host: b.sipDomain, Port: sipPort}
 	network := remote.Headers.GetOr("transport", "udp")
 	if network != "udp" {
-		logger.Warn("unsupported sip transport for answer", "network", network)
+		b.logger.Warn("unsupported sip transport for answer", "network", network)
 		_ = ua.Close()
 		return false
 	}
 
-	lhost := localIP
-	if ip := net.ParseIP(sipDomain); ip != nil && ip.IsLoopback() {
+	lhost := b.localIP
+	if ip := net.ParseIP(b.sipDomain); ip != nil && ip.IsLoopback() {
 		lhost = "127.0.0.1"
 	}
 
 	laddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(lhost, "0"))
 	if err != nil {
-		logger.Warn("sip register: failed to resolve local addr", "err", err)
+		b.logger.Warn("sip register: failed to resolve local addr", "err", err)
 		_ = ua.Close()
 		return false
 	}
 	tmpConn, err := net.ListenUDP("udp4", laddr)
 	if err != nil {
-		logger.Warn("sip register: failed to reserve local port", "err", err)
+		b.logger.Warn("sip register: failed to reserve local port", "err", err)
 		_ = ua.Close()
 		return false
 	}
-	lport := tmpConn.LocalAddr().(*net.UDPAddr).Port
+	la := tmpConn.LocalAddr()
+	ludp, ok := la.(*net.UDPAddr)
+	if !ok {
+		b.logger.Warn("sip register: unexpected local addr type", "got", fmt.Sprintf("%T", la))
+		_ = tmpConn.Close()
+		_ = ua.Close()
+		return false
+	}
+	lport := ludp.Port
 
 	// Важно: держим порт до момента, когда sipgox.Phone начнет слушать.
 	// Иначе возможна гонка между закрытием сокета регистрации и Listen на том же lport.
@@ -389,7 +412,7 @@ func initSIP(
 				sipgo.WithClientNAT(),
 			)
 			if err != nil {
-				logger.Warn("sip register: client init failed", "err", err)
+				b.logger.Warn("sip register: client init failed", "err", err)
 				return
 			}
 
@@ -416,7 +439,7 @@ func initSIP(
 
 			for {
 				if regCtx.Err() != nil {
-					logger.Warn("sip register: giving up", "err", regCtx.Err(), "timeout", registerTotalTimeout.String())
+					b.logger.Warn("sip register: giving up", "err", regCtx.Err(), "timeout", registerTotalTimeout.String())
 					return
 				}
 
@@ -424,22 +447,22 @@ func initSIP(
 				err := regTx.Register(regAttemptCtx)
 				cancel()
 				if err == nil {
-					logger.Info("sip registered", "domain", sipDomain, "port", sipPort, "user", bucisUser)
+					b.logger.Info("sip registered", "domain", b.sipDomain, "port", sipPort, "user", bucisUser)
 					break
 				}
 
-				logger.Warn("sip register failed", "err", err)
+				b.logger.Warn("sip register failed", "err", err)
 				timer := time.NewTimer(1 * time.Second)
 				select {
 				case <-regCtx.Done():
 					timer.Stop()
-					logger.Warn("sip register: giving up", "err", regCtx.Err(), "timeout", registerTotalTimeout.String())
+					b.logger.Warn("sip register: giving up", "err", regCtx.Err(), "timeout", registerTotalTimeout.String())
 					return
 				case <-timer.C:
 				}
 			}
 			if err := regClient.Close(); err != nil {
-				logger.Warn("sip register: client close failed", "err", err)
+				b.logger.Warn("sip register: client close failed", "err", err)
 			}
 		}
 
@@ -454,11 +477,11 @@ func initSIP(
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Warn("sip answer failed", "err", err)
+				b.logger.Warn("sip answer failed", "err", err)
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			logger.Info("sip call answered")
+			b.logger.Info("sip call answered")
 
 			var callCtx context.Context
 			var cancel context.CancelFunc
@@ -466,7 +489,7 @@ func initSIP(
 			if dialog != nil && dialog.MediaSession != nil && dialog.Laddr != nil && dialog.Raddr != nil {
 				lport := dialog.Laddr.Port
 				raddr := dialog.Raddr
-				logger.Info("rtp negotiated",
+				b.logger.Info("rtp negotiated",
 					"local_port", lport,
 					"remote_ip", raddr.IP.String(),
 					"remote_port", raddr.Port,
@@ -479,7 +502,7 @@ func initSIP(
 
 				callCtx, cancel = context.WithCancel(dialog.Context())
 				defer cancel()
-				cleanup, streamDone, rtpErr := rtpsession.Start(callCtx, logger, lport, raddr)
+				cleanup, streamDone, rtpErr := rtpsession.Start(callCtx, b.logger, lport, raddr)
 				if rtpErr != nil {
 					cancel()
 					if cleanup != nil {
@@ -492,7 +515,7 @@ func initSIP(
 					go func() { <-streamDone; cancel() }()
 				}
 			} else {
-				logger.Warn("rtp skipped: missing sdp addresses")
+				b.logger.Warn("rtp skipped: missing sdp addresses")
 			}
 
 			var sipID string
@@ -510,7 +533,7 @@ func initSIP(
 				ok    bool
 			)
 			if sipID != "" {
-				besIP, ok = sipIDs.GetIP(sipID)
+				besIP, ok = b.sipIDs.GetIP(sipID)
 			}
 			if !ok && dialog != nil && dialog.InviteRequest != nil {
 				src := strings.TrimSpace(dialog.InviteRequest.Source())
@@ -519,7 +542,7 @@ func initSIP(
 					host = h
 				}
 				if host != "" {
-					if s, found := sipIDs.FindBySenderIP(host); found {
+					if s, found := b.sipIDs.FindBySenderIP(host); found {
 						sipID = s
 						besIP = host
 						ok = true
@@ -527,7 +550,7 @@ func initSIP(
 				}
 			}
 			if !ok || sipID == "" || besIP == "" {
-				logger.Warn("ec_client_conversation skipped: cannot resolve sip_id/bes_ip", "sip_id", sipID)
+				b.logger.Warn("ec_client_conversation skipped: cannot resolve sip_id/bes_ip", "sip_id", sipID)
 				select {
 				case <-ctx.Done():
 					return
@@ -537,11 +560,11 @@ func initSIP(
 			}
 
 			msg := protocol.FormatClientConversation(sipID)
-			if err := sendTo(besIP, cfg.EC.ListenPort8890, msg); err != nil {
-				logger.Warn("ec_client_conversation send failed", "err", err, "dst", besIP, "sip_id", sipID)
+			if err := b.sendTo(besIP, b.cfg.EC.ListenPort8890, msg); err != nil {
+				b.logger.Warn("ec_client_conversation send failed", "err", err, "dst", besIP, "sip_id", sipID)
 				continue
 			}
-			logger.Info("ec_client_conversation sent", "dst", besIP, "sip_id", sipID)
+			b.logger.Info("ec_client_conversation sent", "dst", besIP, "sip_id", sipID)
 
 			select {
 			case <-ctx.Done():

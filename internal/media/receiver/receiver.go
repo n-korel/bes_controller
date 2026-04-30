@@ -1,6 +1,8 @@
 package receiver
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -100,7 +102,7 @@ func (r *Receiver) StartBySoundType(soundType int) error {
 		conn, err := net.ListenUDP("udp4", laddr)
 		if err != nil {
 			r.mu.Unlock()
-			return err
+			return fmt.Errorf("listen udp media port %d: %w", r.mediaPort, err)
 		}
 		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 			r.mediaPort = a.Port
@@ -114,7 +116,7 @@ func (r *Receiver) StartBySoundType(soundType int) error {
 		conn, err := net.ListenUDP("udp4", laddr)
 		if err != nil {
 			r.mu.Unlock()
-			return err
+			return fmt.Errorf("listen udp media port %d: %w", r.mediaPort, err)
 		}
 		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 			r.mediaPort = a.Port
@@ -252,7 +254,8 @@ func (r *Receiver) runRTP(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan
 
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
 				_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 				continue
 			}
@@ -313,54 +316,68 @@ func (r *Receiver) runSimMic(stopCh <-chan struct{}, doneCh chan<- struct{}) {
 }
 
 func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.playing {
-		return
-	}
-
 	now := time.Now()
-	r.stats.LastPacket = now
 	nowRTPUnits := now.UnixNano() / rtpTickNs
-	if r.stats.Received == 0 {
-		r.stats.FirstSeq = seq
-		r.stats.LastSeq = seq
-		r.stats.MaxSeq = seq
-		r.stats.Cycles = 0
-		r.stats.Received = 1
-		r.stats.LastArrival = nowRTPUnits
-		r.stats.LastRTPTs = rtpTs
-		r.stats.MaxRTPTs = rtpTs
+
+	r.mu.Lock()
+	if !r.playing {
+		r.mu.Unlock()
+		return
+	}
+	s := r.stats
+	r.mu.Unlock()
+
+	s.LastPacket = now
+	if s.Received == 0 {
+		s.FirstSeq = seq
+		s.LastSeq = seq
+		s.MaxSeq = seq
+		s.Cycles = 0
+		s.Received = 1
+		s.LastArrival = nowRTPUnits
+		s.LastRTPTs = rtpTs
+		s.MaxRTPTs = rtpTs
+		r.mu.Lock()
+		if r.playing {
+			r.stats = s
+		}
+		r.mu.Unlock()
 		return
 	}
 
-	arrivalDelta := nowRTPUnits - r.stats.LastArrival
-	tsDelta := int64(int32(rtpTs - r.stats.LastRTPTs))
+	arrivalDelta := nowRTPUnits - s.LastArrival
+	tsDelta := int64(int32(rtpTs - s.LastRTPTs))
 	d := arrivalDelta - tsDelta
 	if d < 0 {
 		d = -d
 	}
-	r.stats.Jitter += (float64(d) - r.stats.Jitter) / 16.0
-	r.stats.LastArrival = nowRTPUnits
-	r.stats.LastRTPTs = rtpTs
+	s.Jitter += (float64(d) - s.Jitter) / 16.0
+	s.LastArrival = nowRTPUnits
+	s.LastRTPTs = rtpTs
 
-	if isNewerTimestamp(rtpTs, r.stats.MaxRTPTs) {
-		extMax := r.stats.Cycles + uint32(r.stats.MaxSeq)
-		u0 := r.stats.Cycles + uint32(seq)
+	if isNewerTimestamp(rtpTs, s.MaxRTPTs) {
+		extMax := s.Cycles + uint32(s.MaxSeq)
+		u0 := s.Cycles + uint32(seq)
 		if u0 > extMax {
-			r.stats.MaxSeq = seq
-			r.stats.MaxRTPTs = rtpTs
+			s.MaxSeq = seq
+			s.MaxRTPTs = rtpTs
 		} else {
 			u1 := u0 + (1 << 16)
 			if u1 > extMax && (u1-extMax) <= maxWrapForwardGap {
-				r.stats.Cycles += 1 << 16
-				r.stats.MaxSeq = seq
-				r.stats.MaxRTPTs = rtpTs
+				s.Cycles += 1 << 16
+				s.MaxSeq = seq
+				s.MaxRTPTs = rtpTs
 			}
 		}
 	}
-	r.stats.LastSeq = seq
-	r.stats.Received++
+	s.LastSeq = seq
+	s.Received++
+
+	r.mu.Lock()
+	if r.playing {
+		r.stats = s
+	}
+	r.mu.Unlock()
 }
 
 func isNewerTimestamp(a, b uint32) bool {

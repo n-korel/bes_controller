@@ -2,6 +2,7 @@ package bes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -53,6 +54,7 @@ type Options struct {
 	OnConversationReceived chan<- string
 }
 
+//nolint:gocyclo // Оркестратор сценария: дробление на мелкие функции ухудшит читаемость потока.
 func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error {
 	mac := strings.TrimSpace(opts.MAC)
 	if mac == "" {
@@ -71,7 +73,7 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 
 	lconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: cfg.EC.ListenPort8890})
 	if err != nil {
-		return err
+		return fmt.Errorf("listen udp 8890: %w", err)
 	}
 	defer func() { _ = lconn.Close() }()
 
@@ -105,7 +107,8 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 			_ = lconn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			n, raddr, err := lconn.ReadFromUDP(buf)
 			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
 					if ctx.Err() != nil {
 						return
 					}
@@ -124,6 +127,9 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 			}
 
 			switch pkt.Type {
+			case protocol.ECPacketUnknown, protocol.ECPacketClientQuery:
+				// ignore: these packet types are handled by the other side
+				continue
 			case protocol.ECPacketClientReset:
 				if pkt.Reset == nil {
 					continue
@@ -188,16 +194,19 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 	sendQueryOnce := func() error {
 		raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.EC.BucisAddr, strconv.Itoa(cfg.EC.BesQueryDstPort)))
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve query addr: %w", err)
 		}
 		conn, err := net.DialUDP("udp4", nil, raddr)
 		if err != nil {
-			return err
+			return fmt.Errorf("dial query addr: %w", err)
 		}
 		defer func() { _ = conn.Close() }()
 		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 		_, err = conn.Write([]byte(protocol.FormatClientQuery(mac)))
-		return err
+		if err != nil {
+			return fmt.Errorf("send query: %w", err)
+		}
+		return nil
 	}
 
 	// KeepAlive heartbeat: log if we stop receiving keepalives.
@@ -231,14 +240,14 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 	}
 
 	fsm := besFSM{
-		cfg:                    cfg,
-		logger:                 logger,
-		state:                  &state,
-		sendQueryOnce:          sendQueryOnce,
-		runSIP:                 opts.RunSIP,
-		resetCh:                resetCh,
-		pressCh:                pressCh,
-		answers:                answers,
+		cfg:                      cfg,
+		logger:                   logger,
+		state:                    &state,
+		sendQueryOnce:            sendQueryOnce,
+		runSIP:                   opts.RunSIP,
+		resetCh:                  resetCh,
+		pressCh:                  pressCh,
+		answers:                  answers,
 		autoPressAfterFirstReset: opts.AutoPressAfterFirstReset,
 	}
 
@@ -307,6 +316,7 @@ func doPress(
 	cfg config.Bes,
 	sendQueryOnce func() error,
 	answers <-chan answerEvent,
+	cancelCh <-chan struct{},
 ) (sipID string, newIP string, err error) {
 	for attempt := 1; attempt <= cfg.EC.ClientQueryMaxRetries; attempt++ {
 		if err := sendQueryOnce(); err != nil {
@@ -319,7 +329,10 @@ func doPress(
 		select {
 		case <-ctx.Done():
 			timeout.Stop()
-			return "", "", ctx.Err()
+			return "", "", fmt.Errorf("context done: %w", ctx.Err())
+		case <-cancelCh:
+			timeout.Stop()
+			return "", "", fmt.Errorf("canceled: %w", context.Canceled)
 		case ev := <-answers:
 			timeout.Stop()
 			if ev.answer == nil {
@@ -339,7 +352,10 @@ func doPress(
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return "", "", ctx.Err()
+				return "", "", fmt.Errorf("context done: %w", ctx.Err())
+			case <-cancelCh:
+				timer.Stop()
+				return "", "", fmt.Errorf("canceled: %w", context.Canceled)
 			case <-timer.C:
 			}
 		}
@@ -356,9 +372,9 @@ type besFSM struct {
 	sendQueryOnce func() error
 	runSIP        RunSIPFunc
 
-	resetCh                <-chan struct{}
-	pressCh                <-chan struct{}
-	answers                <-chan answerEvent
+	resetCh                  <-chan struct{}
+	pressCh                  <-chan struct{}
+	answers                  <-chan answerEvent
 	autoPressAfterFirstReset bool
 }
 
@@ -372,7 +388,7 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 		case stateUnregistered:
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case <-f.resetCh:
 				st = stateRegistrationIdle
 				f.state.Store(st)
@@ -382,10 +398,10 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 					f.state.Store(st)
 					f.drainAnswers()
 					f.drainPress()
-					sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers)
+					sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers, f.resetCh)
 					if err != nil {
 						if ctx.Err() != nil {
-							return ctx.Err()
+							return fmt.Errorf("context done: %w", ctx.Err())
 						}
 						f.logger.Warn("press failed", "err", err)
 						st = stateRegistrationIdle
@@ -403,20 +419,19 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 		case stateRegistrationIdle:
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case <-f.resetCh:
 			case <-f.pressCh:
 				st = stateRegistrationQuery
 				f.state.Store(st)
 
 				f.drainPress()
-				f.drainReset()
 				f.drainAnswers()
 
-				sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers)
+				sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers, f.resetCh)
 				if err != nil {
 					if ctx.Err() != nil {
-						return ctx.Err()
+						return fmt.Errorf("context done: %w", ctx.Err())
 					}
 					f.logger.Warn("press failed", "err", err)
 					// Ignore any presses that happened while we were querying.
@@ -438,7 +453,7 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 		}
 	}
 
-	return ctx.Err()
+	return fmt.Errorf("context done: %w", ctx.Err())
 }
 
 func (f *besFSM) drainAnswers() {
@@ -465,16 +480,6 @@ func (f *besFSM) drainPress() {
 	for {
 		select {
 		case <-f.pressCh:
-		default:
-			return
-		}
-	}
-}
-
-func (f *besFSM) drainReset() {
-	for {
-		select {
-		case <-f.resetCh:
 		default:
 			return
 		}
@@ -591,7 +596,7 @@ func DefaultRunSIP(
 		sipgo.WithUserAgentHostname(domain),
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("sip ua init: %w", err)
 	}
 	defer func() { _ = ua.Close() }()
 
@@ -605,7 +610,12 @@ func DefaultRunSIP(
 	}))
 	defer phone.Close()
 
-	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
+	callSetupTimeout := cfg.EC.CallSetupTimeout
+	if callSetupTimeout <= 0 {
+		callSetupTimeout = 15 * time.Second
+	}
+
+	dialCtx, cancelDial := context.WithTimeout(ctx, callSetupTimeout)
 	defer cancelDial()
 	dialog, err := phone.Dial(dialCtx, sip.Uri{User: bucisUser, Host: domain, Port: sipPort}, sipgox.DialOptions{
 		Username: besUser,
@@ -613,7 +623,7 @@ func DefaultRunSIP(
 		Formats:  sdp.NewFormats(strconv.Itoa(int(rtp.PayloadTypeG726()))),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("sip dial: %w", err)
 	}
 	defer func() { _ = dialog.Close() }()
 	logger.Info("sip call established", "to", bucisUser, "domain", domain)
@@ -667,13 +677,13 @@ func DefaultRunSIP(
 
 		if rtpErr != nil {
 			stopRTP()
-			return rtpErr
+			hangupAndWait()
+			return fmt.Errorf("rtp session start: %w", rtpErr)
 		}
 	} else {
 		logger.Warn("rtp skipped: missing sdp addresses")
 	}
 
-	callSetupTimeout := cfg.EC.CallSetupTimeout
 	if sipID != "" {
 		timer := time.NewTimer(callSetupTimeout)
 		defer timer.Stop()
@@ -681,7 +691,7 @@ func DefaultRunSIP(
 			select {
 			case <-ctx.Done():
 				hangupAndWait()
-				return ctx.Err()
+				return fmt.Errorf("context done: %w", ctx.Err())
 			case <-dialog.Context().Done():
 				return nil
 			case <-timer.C:
@@ -704,7 +714,7 @@ afterConversation:
 	select {
 	case <-ctx.Done():
 		hangupAndWait()
-		return ctx.Err()
+		return fmt.Errorf("context done: %w", ctx.Err())
 	case <-dialog.Context().Done():
 		return nil
 	case <-timer.C:
@@ -713,4 +723,3 @@ afterConversation:
 		return nil
 	}
 }
-

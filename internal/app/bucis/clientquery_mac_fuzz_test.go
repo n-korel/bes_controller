@@ -25,7 +25,7 @@ func FuzzClientQueryMACNormalization(f *testing.F) {
 			return
 		}
 
-		s := newSipIDState()
+		s := newSipIDState(0)
 
 		gotUpper := s.GetOrCreate(strings.ToUpper(mac))
 		gotLower := s.GetOrCreate(strings.ToLower(mac))
@@ -39,4 +39,3 @@ func FuzzClientQueryMACNormalization(f *testing.F) {
 		}
 	})
 }
-

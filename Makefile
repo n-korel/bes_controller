@@ -1,50 +1,103 @@
-.PHONY: build bucis bes bes-windows clean lint test run-bucis run-bes run-bes-press opensips opensips-lan
+.PHONY: all build clean \
+	bin \
+	bucis bes bes-windows \
+	fmt fmt-check \
+	lint vet \
+	test test-race-cover bench \
+	vulncheck tidy \
+	check ci \
+	run-bucis run-bes run-bes-press \
+	opensips opensips-lan
+
+all: build
+
+bin:
+	mkdir -p ./bin
 
 build: bucis bes
 
-./bin:
-	mkdir -p "./bin"
+bucis: bin
+	go build -v -o ./bin/bucis ./cmd/bucis
 
-bucis: ./bin
-	go build -o "./bin/bucis" ./cmd/bucis
+bes: bin
+	go build -v -o ./bin/bes ./cmd/bes
 
-bes: ./bin
-	go build -o "./bin/bes" ./cmd/bes
-
-bes-windows: ./bin
-	GOOS=windows GOARCH=amd64 go build -o "./bin/bes.exe" ./cmd/bes
-
-run-bucis: bucis
-	-pkill -x bucis || true
-	set -a; [ -f .env ] && . ./.env; set +a; \
-	p6710="$${EC_BUCIS_QUERY_PORT_6710:-6710}"; \
-	p7777="$${EC_BUCIS_QUERY_PORT_7777:-7777}"; \
-	for p in "$$p6710" "$$p7777"; do \
-		i=0; \
-		while [ $$i -lt 50 ]; do \
-			python3 -c 'import socket,sys; p=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("0.0.0.0",p)); s.close()' "$$p" && break || true; \
-			sleep 0.1; \
-			i=$$((i+1)); \
-		done; \
-	done; \
-	"./bin/bucis"
-
-run-bes: bes
-	-pkill -x bes || true
-	set -a; [ -f .env ] && . ./.env; set +a; "./bin/bes"
-
-run-bes-press: bes
-	-pkill -x bes || true
-	set -a; [ -f .env ] && . ./.env; set +a; "./bin/bes" --press
+bes-windows: bin
+	GOOS=windows GOARCH=amd64 go build -o ./bin/bes.exe ./cmd/bes
 
 clean:
-	rm -rf "./bin"
+	rm -rf ./bin
+
+# =========================
+# Formatting
+# =========================
+
+fmt:
+	go list -f '{{.Dir}}' ./... | xargs goimports -w
+
+fmt-check:
+	@files="$$( go list -f '{{.Dir}}' ./... | xargs goimports -l )"; \
+	if [ -n "$$files" ]; then \
+		echo "Unformatted files:"; \
+		echo "$$files"; \
+		exit 1; \
+	fi
+
+# =========================
+# Lint & analysis
+# =========================
 
 lint:
-	golangci-lint run ./...
+	golangci-lint run --timeout=3m --config .golangci.yml
+
+vet:
+	go vet ./...
+
+# =========================
+# Tests
+# =========================
 
 test:
 	go test ./...
+
+test-race-cover:
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
+bench:
+	go test -bench=. -benchmem ./...
+
+# =========================
+# Security & deps
+# =========================
+
+vulncheck:
+	govulncheck ./...
+
+tidy:
+	go mod tidy
+	@git diff --exit-code -- go.mod go.sum
+
+# =========================
+# Pipelines
+# =========================
+
+check: fmt-check vet lint test-race-cover vulncheck tidy
+
+ci: check
+
+# =========================
+# Run (локально)
+# =========================
+
+run-bucis: bucis
+	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bucis
+
+run-bes: bes
+	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bes
+
+run-bes-press: bes
+	set -a; [ -f "$${ENV_FILE:-.env}" ] && . "$${ENV_FILE:-.env}"; set +a; exec ./bin/bes --press
 
 opensips:
 	-sudo pkill -f "opensips -f deploy/opensips/opensips.cfg"

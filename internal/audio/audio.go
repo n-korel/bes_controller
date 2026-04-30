@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -56,11 +57,11 @@ func StartPlayback(ctx context.Context, device string) (*Playback, error) {
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("aplay stdin pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
-		return nil, err
+		return nil, fmt.Errorf("aplay start: %w", err)
 	}
 
 	p := &Playback{cmd: cmd, stdin: stdin}
@@ -90,7 +91,10 @@ func (p *Playback) WritePCM(pcm []int16) error {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
 	}
 	_, err := p.stdin.Write(buf)
-	return err
+	if err != nil {
+		return fmt.Errorf("aplay write: %w", err)
+	}
+	return nil
 }
 
 func (p *Playback) Close() error {
@@ -101,7 +105,10 @@ func (p *Playback) Close() error {
 		_ = p.stdin.Close()
 	}
 	if p.cmd != nil {
-		return p.cmd.Wait()
+		if err := p.cmd.Wait(); err != nil {
+			return fmt.Errorf("aplay wait: %w", err)
+		}
+		return nil
 	}
 	return nil
 }
@@ -126,10 +133,10 @@ func StartCaptureFrames(ctx context.Context, device string) (<-chan []int16, err
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("arecord stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("arecord start: %w", err)
 	}
 
 	out := make(chan []int16, 4)

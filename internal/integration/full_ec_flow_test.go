@@ -26,7 +26,12 @@ func freeUDPPort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("ListenUDP: %v", err)
 	}
-	p := c.LocalAddr().(*net.UDPAddr).Port
+	la, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = c.Close()
+		t.Fatalf("LocalAddr: want *net.UDPAddr, got %T", c.LocalAddr())
+	}
+	p := la.Port
 	_ = c.Close()
 	return p
 }
@@ -100,7 +105,7 @@ func TestIntegration_FullECFlow(t *testing.T) {
 				raddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: p8890}
 				conn, err := net.DialUDP("udp4", nil, raddr)
 				if err != nil {
-					return err
+					return fmt.Errorf("dial udp %s: %w", raddr.String(), err)
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 				_, _ = conn.Write([]byte(protocol.FormatClientConversation(sipID)))
@@ -273,7 +278,7 @@ func TestIntegration_ClientQuery_Port7777(t *testing.T) {
 				raddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: p8890}
 				conn, err := net.DialUDP("udp4", nil, raddr)
 				if err != nil {
-					return err
+					return fmt.Errorf("dial udp %s: %w", raddr.String(), err)
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 				_, _ = conn.Write([]byte(protocol.FormatClientConversation(sipID)))
@@ -375,4 +380,3 @@ func TestIntegration_ClientQuery_Port7777(t *testing.T) {
 		t.Fatalf("bucis did not stop after cancel")
 	}
 }
-

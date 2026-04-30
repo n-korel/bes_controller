@@ -18,4 +18,3 @@ func TestStartCaptureFrames_NullDevice_ReturnsError(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
-

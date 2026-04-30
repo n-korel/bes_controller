@@ -14,6 +14,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	log.Init(os.Getenv("LOG_FORMAT"))
 	logger := log.With("role", "bucis")
 
@@ -42,11 +49,8 @@ func main() {
 	fs.StringVar(&head2, "ec-head2-ip", "", "ClientReset head2 IP (default: head1)")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
-
-	_ = fs // флаги читаем для совместимости CLI, overrides применяем вручную ниже
 
 	if err := app.Run(ctx, logger, app.Options{
 		BesBroadcastAddr:    besBroadcast,
@@ -57,7 +61,7 @@ func main() {
 		Head1IP:             head1,
 		Head2IP:             head2,
 	}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return fmt.Errorf("bucis run: %w", err)
 	}
+	return nil
 }

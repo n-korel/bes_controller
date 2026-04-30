@@ -2,6 +2,7 @@ package g726
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const (
@@ -33,7 +35,7 @@ func requireFFmpeg(t *testing.T) string {
 func writeS16LE(path string, samples []int16) error {
 	f, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("create file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -45,13 +47,16 @@ func writeS16LE(path string, samples []int16) error {
 		buf.Write(b[:])
 	}
 	_, err = f.Write(buf.Bytes())
-	return err
+	if err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+	return nil
 }
 
 func readS16LE(path string) ([]int16, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read file: %w", err)
 	}
 	if len(b)%2 != 0 {
 		return nil, fmt.Errorf("s16le file has odd size: %d", len(b))
@@ -66,7 +71,9 @@ func readS16LE(path string) ([]int16, error) {
 
 func runFFmpeg(ffmpegPath string, args ...string) ([]byte, error) {
 	args = append([]string{"-y"}, args...)
-	cmd := exec.Command(ffmpegPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -314,4 +321,3 @@ func TestG726CrossCheck_SmokeFFmpegG726Demuxer(t *testing.T) {
 
 	decodeWithFFmpegRawG726ToPCM(t, ffmpegPath, outG726, "g726le", outPCM)
 }
-

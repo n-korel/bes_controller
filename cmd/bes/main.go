@@ -17,6 +17,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	pressFlag := flag.Bool("press", false, "send ClientQuery immediately after first ClientReset")
 	flag.Parse()
 
@@ -28,19 +35,21 @@ func main() {
 
 	cfg, err := config.ParseBes()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return fmt.Errorf("parse bes config: %w", err)
 	}
 
 	// Log the resolved keepalive settings to avoid confusion around EC_KEEPALIVE_TIMEOUT=0.
-	// Note: config applies "timeout=0 => timeout=3*interval".
+	// Note: config applies "timeout=0/unset => timeout=3*interval" and "-1 => disabled".
 	{
 		raw, ok := os.LookupEnv("EC_KEEPALIVE_TIMEOUT")
 		raw = strings.TrimSpace(raw)
 		timeoutExplicitlyZero := false
+		timeoutExplicitlyDisabled := false
 		timeoutWasUnset := !ok || raw == ""
 		if ok && raw != "" {
-			if d, err := time.ParseDuration(raw); err == nil && d == 0 {
+			if raw == "-1" {
+				timeoutExplicitlyDisabled = true
+			} else if d, err := time.ParseDuration(raw); err == nil && d == 0 {
 				timeoutExplicitlyZero = true
 			}
 		}
@@ -50,7 +59,9 @@ func main() {
 			"timeout", cfg.EC.KeepAliveTimeout.String(),
 			"timeout_env", raw,
 		)
-		if timeoutWasUnset || timeoutExplicitlyZero {
+		if timeoutExplicitlyDisabled || cfg.EC.KeepAliveTimeout < 0 {
+			logger.Info("ec keepalive monitoring disabled", "rule", "EC_KEEPALIVE_TIMEOUT=-1")
+		} else if timeoutWasUnset || timeoutExplicitlyZero {
 			logger.Info("ec keepalive timeout resolved from interval",
 				"timeout", cfg.EC.KeepAliveTimeout.String(),
 				"interval", cfg.EC.KeepAliveInterval.String(),
@@ -84,7 +95,7 @@ func main() {
 		PressCh:                  pressCh,
 		AutoPressAfterFirstReset: *pressFlag,
 	}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return fmt.Errorf("bes run: %w", err)
 	}
+	return nil
 }

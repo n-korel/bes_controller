@@ -13,7 +13,7 @@ const (
 	g726LogFracMask = (1 << g726LogFracBits) - 1 // 0x7f
 
 	// ITU-T G.726, Annex A, block FMULT: rounding constant before >>4 in mantissa multiply.
-	g726FmultRounding = 0x30
+	g726FmultRounding  = 0x30
 	g726FmultMantShift = 4
 
 	// ITU-T G.726, Annex A, block FMULT: exponent alignment constant for this float11 format.
@@ -25,7 +25,7 @@ const (
 	g726YuMax = 5120
 
 	// ITU-T G.726, Annex A, blocks LIMC/LIMD: predictor coefficient limits (32 kbit/s mode).
-	g726A2Limit = 12288
+	g726A2Limit     = 12288
 	g726A1LimitBase = 15360
 
 	// ITU-T G.726, Annex A, block TONE: a2 threshold for tone/modem (data) detection.
@@ -206,11 +206,11 @@ func inverseQuant(c *g726Core, i int) int16 {
 	return int16((dqt << dex) >> g726LogFracBits)
 }
 
-func g726DecodeUpdate(c *g726Core, I int) int16 {
-	I &= (1 << c.code) - 1
-	I_sig := I >> (c.code - 1)
+func g726DecodeUpdate(c *g726Core, i int) int16 {
+	i &= (1 << c.code) - 1
+	iSig := i >> (c.code - 1)
 
-	dq := int(inverseQuant(c, I))
+	dq := int(inverseQuant(c, i))
 
 	ylint := c.yl >> 15
 	ylfrac := (c.yl >> 10) & 0x1f
@@ -222,7 +222,7 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 	}
 	tr := c.td == 1 && dq > ((3*thr2)>>2)
 
-	if I_sig != 0 {
+	if iSig != 0 {
 		dq = -dq
 	}
 	reSignal := int16(c.se + dq)
@@ -267,15 +267,15 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 		c.dq[i] = c.dq[i-1]
 	}
 	i2f(dq, &c.dq[0])
-	c.dq[0].sign = uint8(I_sig)
+	c.dq[0].sign = uint8(iSig)
 
 	c.td = 0
 	if c.a[1] < g726ToneA2Threshold {
 		c.td = 1
 	}
 
-	c.dms += int(fTbl32[I])<<4 + ((-c.dms) >> 5)
-	c.dml += int(fTbl32[I])<<4 + ((-c.dml) >> 7)
+	c.dms += int(fTbl32[i])<<4 + ((-c.dms) >> 5)
+	c.dml += int(fTbl32[i])<<4 + ((-c.dml) >> 7)
 	if tr {
 		c.ap = 256
 	} else {
@@ -285,7 +285,7 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 		}
 	}
 
-	c.yu = clipInt(c.y+int(wTbl32[I])+((-c.y)>>5), g726YuMin, g726YuMax)
+	c.yu = clipInt(c.y+int(wTbl32[i])+((-c.y)>>5), g726YuMin, g726YuMax)
 	c.yl += c.yu + ((-c.yl) >> 6)
 
 	al := c.ap >> 2
