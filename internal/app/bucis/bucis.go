@@ -176,20 +176,7 @@ func Run(ctx context.Context, logger Logger, opts Options) error {
 	sendKeepAlive()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(cfg.EC.ClientResetInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				sendReset()
-			}
-		}
-	}()
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(cfg.EC.KeepAliveInterval)

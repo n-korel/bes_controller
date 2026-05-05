@@ -623,7 +623,10 @@ func DefaultRunSIP(
 	hangupAndWait := func() {
 		hangupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = dialog.Hangup(hangupCtx)
+		if err := dialog.Hangup(hangupCtx); err != nil {
+			logger.Warn("sip hangup failed", "err", err)
+			_ = dialog.Close()
+		}
 	}
 	defer func() { stopRTP() }()
 
@@ -665,7 +668,10 @@ func DefaultRunSIP(
 		hangupAndWait = func() {
 			hangupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = dialog.Hangup(hangupCtx)
+			if err := dialog.Hangup(hangupCtx); err != nil {
+				logger.Warn("sip hangup failed", "err", err)
+				_ = dialog.Close()
+			}
 			stopRTP()
 		}
 

@@ -315,6 +315,7 @@ func TestParseBes_ConversationTimeout_ParsesAndZeroMeansUnlimited(t *testing.T) 
 	t.Setenv("EC_CONVERSATION_TIMEOUT", "")
 
 	cfg2, err := ParseBes()
+
 	if err != nil {
 		t.Fatalf("ParseBes: %v", err)
 	}

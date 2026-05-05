@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -493,6 +494,109 @@ func TestBUCIS_Reset_HeadSelection_FlagsOverEnv_AndHead2DefaultsToHead1(t *testi
 		if time.Now().After(deadline) {
 			cancel()
 			t.Fatalf("timeout waiting for ec_client_reset")
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run did not stop after context cancel")
+	}
+}
+
+func TestBUCIS_Reset_SentOnlyOnce_EvenIfIntervalIsSmall(t *testing.T) {
+	answerPort := freeUDPPort(t)
+
+	t.Setenv("LOG_FORMAT", "console")
+	t.Setenv("SIP_DOMAIN", "127.0.0.1")
+
+	// query порты не используются в этом тесте, но run их откроет
+	t.Setenv("EC_BUCIS_QUERY_PORT_6710", strconv.Itoa(freeUDPPort(t)))
+	t.Setenv("EC_BUCIS_QUERY_PORT_7777", strconv.Itoa(freeUDPPort(t)))
+	t.Setenv("EC_LISTEN_PORT_8890", strconv.Itoa(answerPort))
+
+	// reset-interval ставим маленьким; keepalive отключаем большим, чтобы не шумел в тесте
+	t.Setenv("EC_BES_BROADCAST_ADDR", "127.0.0.1")
+	t.Setenv("EC_CLIENT_RESET_INTERVAL", "10ms")
+	t.Setenv("EC_KEEPALIVE_INTERVAL", "1h")
+
+	// SIP часть должна быть отключена
+	t.Setenv("SIP_USER_BUCIS", "")
+	t.Setenv("SIP_PASS_BUCIS", "")
+
+	log.Init(os.Getenv("LOG_FORMAT"))
+	logger := log.With("role", "bucis-test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Run(ctx, logger, app.Options{})
+	}()
+
+	lconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
+	if err != nil {
+		cancel()
+		t.Fatalf("listen 8890: %v", err)
+	}
+	defer func() { _ = lconn.Close() }()
+
+	buf := make([]byte, 2048)
+
+	// 1) Дождаться первого reset.
+	var gotFirst bool
+	waitFirstDeadline := time.Now().Add(2 * time.Second)
+	for {
+		_ = lconn.SetReadDeadline(waitFirstDeadline)
+		n, _, err := lconn.ReadFromUDP(buf)
+		if err != nil {
+			cancel()
+			t.Fatalf("read 8890: %v", err)
+		}
+		pkt, ok := protocol.Parse(buf[:n])
+		if ok && pkt.Type == protocol.ECPacketClientReset && pkt.Reset != nil {
+			gotFirst = true
+			break
+		}
+		if time.Now().After(waitFirstDeadline) {
+			cancel()
+			t.Fatalf("timeout waiting for first ec_client_reset")
+		}
+	}
+	if !gotFirst {
+		cancel()
+		t.Fatalf("did not receive first ec_client_reset")
+	}
+
+	// 2) Проверить, что второго reset не приходит.
+	// Интервал в 10ms означает, что при старой логике повтор пришёл бы многократно.
+	noSecondUntil := time.Now().Add(150 * time.Millisecond)
+	for {
+		_ = lconn.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+		n, _, err := lconn.ReadFromUDP(buf)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				if time.Now().After(noSecondUntil) {
+					break
+				}
+				continue
+			}
+			cancel()
+			t.Fatalf("read 8890: %v", err)
+		}
+		pkt, ok := protocol.Parse(buf[:n])
+		if ok && pkt.Type == protocol.ECPacketClientReset && pkt.Reset != nil {
+			cancel()
+			t.Fatalf("unexpected repeated ec_client_reset")
+		}
+		if time.Now().After(noSecondUntil) {
+			break
 		}
 	}
 
