@@ -23,6 +23,272 @@ type Logger interface {
 	Warn(string, ...any)
 }
 
+// StartFromConn is identical to Start but accepts an already-open UDP connection
+// instead of a local port number. This eliminates the race window between
+// closing a previous socket and binding a new one on the same port.
+// The conn is handed off to the receiver; it must not be used by the caller afterwards.
+//
+//nolint:gocyclo // Оркестратор RTP — дублирует Start с заменой точки входа в receiver.
+func StartFromConn(
+	ctx context.Context,
+	logger Logger,
+	conn *net.UDPConn,
+	remoteAddr *net.UDPAddr,
+) (cleanup func(), streamDone <-chan struct{}, err error) {
+	if conn == nil {
+		return nil, nil, fmt.Errorf("nil conn")
+	}
+	if remoteAddr == nil {
+		return nil, nil, fmt.Errorf("nil remote addr")
+	}
+
+	rx := receiver.New(0)
+
+	var pb *audio.Playback
+	var tx *sender.Sender
+	var stopPlayout chan struct{}
+	var playoutDone chan struct{}
+
+	if audio.Enabled() {
+		var startPBErr error
+		pb, startPBErr = audio.StartPlayback(ctx, audio.Device())
+		if startPBErr == nil {
+			playout := make(chan []int16, 64)
+			stopPlayout = make(chan struct{})
+			playoutDone = make(chan struct{})
+			rx.SetPCMSink(func(pcm []int16) {
+				select {
+				case playout <- pcm:
+				default:
+				}
+			})
+			go func() {
+				defer close(playoutDone)
+				silence := make([]int16, rtp.SamplesPerFrame)
+
+				prefillFrames := 10
+				if v := strings.TrimSpace(os.Getenv("AUDIO_PLAYOUT_PREFILL_FRAMES")); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						if n < 0 {
+							n = 0
+						}
+						prefillFrames = n
+					}
+				}
+				for i := 0; i < prefillFrames; i++ {
+					if err := pb.WritePCM(silence); err != nil {
+						logger.Warn("audio playback stopped", "err", err)
+						return
+					}
+				}
+
+				t := time.NewTicker(rtp.FrameDuration)
+				defer t.Stop()
+
+				var last []int16
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-stopPlayout:
+						return
+					case <-t.C:
+						for {
+							select {
+							case f := <-playout:
+								last = f
+							default:
+								goto play
+							}
+						}
+					play:
+						if last == nil || len(last) != rtp.SamplesPerFrame {
+							if err := pb.WritePCM(silence); err != nil {
+								logger.Warn("audio playback stopped", "err", err)
+								return
+							}
+							continue
+						}
+						if err := pb.WritePCM(last); err != nil {
+							logger.Warn("audio playback stopped", "err", err)
+							return
+						}
+					}
+				}
+			}()
+		} else {
+			logger.Warn("audio playback disabled", "err", startPBErr)
+			pb = nil
+		}
+	}
+
+	if startErr := rx.StartFromConn(conn); startErr != nil {
+		logger.Warn("rtp rx start failed", "err", startErr)
+		if pb != nil {
+			_ = pb.Close()
+		}
+		return nil, nil, fmt.Errorf("rtp rx start: %w", startErr)
+	}
+	logger.Info("rtp rx started", "local_port", rx.MediaPort())
+
+	cleanupDone := make(chan struct{})
+	var cleanupMu sync.Mutex
+	var cleanupRan bool
+	cleanup = func() {
+		cleanupMu.Lock()
+		if cleanupRan {
+			cleanupMu.Unlock()
+			return
+		}
+		cleanupRan = true
+		cleanupMu.Unlock()
+
+		defer close(cleanupDone)
+		if stopPlayout != nil {
+			close(stopPlayout)
+		}
+		if pb != nil {
+			_ = pb.Close()
+		}
+		if playoutDone != nil {
+			<-playoutDone
+		}
+		if tx != nil {
+			_ = tx.Close()
+		}
+		if rx != nil {
+			stats, stopErr := rx.Stop()
+			if stopErr != nil {
+				logger.Warn("rtp rx stop failed", "err", stopErr)
+			}
+			if stats.Received > 0 {
+				logger.Info("rtp stats",
+					"received", stats.Received,
+					"expected", stats.Expected(),
+					"lost", stats.Lost(),
+					"jitter_ms", stats.JitterMs(),
+				)
+			}
+		}
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			cleanup()
+		case <-cleanupDone:
+		}
+	}()
+
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-cleanupDone:
+				return
+			case <-t.C:
+				s := rx.StatsSnapshot()
+				age := time.Since(s.LastPacket)
+				if s.Received == 0 {
+					logger.Info("rtp health", "received", 0, "last_packet_age", age.String())
+					continue
+				}
+				expected := s.Expected()
+				lost := s.Lost()
+				lossRatio := 0.0
+				if expected > 0 {
+					lossRatio = float64(lost) / float64(expected)
+				}
+				if lossRatio > 0.05 {
+					logger.Warn("rtp loss high",
+						"received", s.Received,
+						"expected", expected,
+						"lost", lost,
+						"loss_ratio", lossRatio,
+						"jitter_ms", s.JitterMs(),
+						"last_packet_age", age.String(),
+					)
+					continue
+				}
+				logger.Info("rtp health",
+					"received", s.Received,
+					"expected", expected,
+					"lost", lost,
+					"jitter_ms", s.JitterMs(),
+					"last_packet_age", age.String(),
+				)
+			}
+		}
+	}()
+
+	if c := rx.Conn(); c != nil {
+		tx, err = sender.NewFromConn(c, remoteAddr)
+	} else {
+		tx, err = sender.NewTo(remoteAddr)
+	}
+	if err != nil {
+		logger.Warn("rtp tx create failed", "remote_ip", remoteAddr.IP.String(), "remote_port", remoteAddr.Port, "err", err)
+		return cleanup, nil, fmt.Errorf("rtp tx create: %w", err)
+	}
+	logger.Info("rtp tx started", "remote_ip", remoteAddr.IP.String(), "remote_port", remoteAddr.Port)
+
+	var frames <-chan []int16
+	if audio.Enabled() {
+		ch, capErr := audio.StartCaptureFrames(ctx, audio.Device())
+		if capErr == nil {
+			frames = ch
+		} else {
+			logger.Warn("audio capture disabled", "err", capErr)
+		}
+	}
+	if frames == nil {
+		silenceCh := make(chan []int16, 1)
+		frames = silenceCh
+		go func() {
+			ticker := time.NewTicker(rtp.FrameDuration)
+			defer ticker.Stop()
+
+			silence := make([]int16, rtp.SamplesPerFrame)
+			for {
+				select {
+				case <-ctx.Done():
+					close(silenceCh)
+					return
+				case <-cleanupDone:
+					close(silenceCh)
+					return
+				case <-ticker.C:
+					select {
+					case silenceCh <- silence:
+					default:
+						select {
+						case <-silenceCh:
+						default:
+						}
+						select {
+						case silenceCh <- silence:
+						default:
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		if streamErr := tx.StreamFramesAt(ctx, time.Now().UnixMilli(), frames); streamErr != nil && ctx.Err() == nil {
+			logger.Warn("rtp tx stopped with error", "err", streamErr)
+		}
+	}()
+
+	return cleanup, doneCh, nil
+}
+
 // Start запускает RTP receiver + (опциональный) playback playout + sender streaming.
 //
 // Возвращаемая cleanup() останавливает receiver, закрывает sender и playback.
@@ -148,47 +414,59 @@ func Start(
 	}
 	logger.Info("rtp rx started", "local_port", rx.MediaPort())
 
-	var cleanupOnce sync.Once
+	cleanupDone := make(chan struct{})
+	var cleanupMu sync.Mutex
+	var cleanupRan bool
 	cleanup = func() {
-		cleanupOnce.Do(func() {
-			// Важно: playout-горутину останавливаем явно (без требования ctx.Cancel),
-			// и первым делом закрываем playback, чтобы разблокировать возможный WritePCM().
-			if stopPlayout != nil {
-				close(stopPlayout)
-			}
-			if pb != nil {
-				_ = pb.Close()
-			}
-			if playoutDone != nil {
-				<-playoutDone
-			}
+		cleanupMu.Lock()
+		if cleanupRan {
+			cleanupMu.Unlock()
+			return
+		}
+		cleanupRan = true
+		cleanupMu.Unlock()
 
-			// Дальше останавливаем исходящий поток (tx), потом принимающий (rx).
-			if tx != nil {
-				_ = tx.Close()
+		defer close(cleanupDone)
+		// Важно: playout-горутину останавливаем явно (без требования ctx.Cancel),
+		// и первым делом закрываем playback, чтобы разблокировать возможный WritePCM().
+		if stopPlayout != nil {
+			close(stopPlayout)
+		}
+		if pb != nil {
+			_ = pb.Close()
+		}
+		if playoutDone != nil {
+			<-playoutDone
+		}
+
+		// Дальше останавливаем исходящий поток (tx), потом принимающий (rx).
+		if tx != nil {
+			_ = tx.Close()
+		}
+		if rx != nil {
+			stats, stopErr := rx.Stop()
+			if stopErr != nil {
+				logger.Warn("rtp rx stop failed", "err", stopErr)
 			}
-			if rx != nil {
-				stats, stopErr := rx.Stop()
-				if stopErr != nil {
-					logger.Warn("rtp rx stop failed", "err", stopErr)
-				}
-				if stats.Received > 0 {
-					logger.Info("rtp stats",
-						"received", stats.Received,
-						"expected", stats.Expected(),
-						"lost", stats.Lost(),
-						"jitter_ms", stats.JitterMs(),
-					)
-				}
+			if stats.Received > 0 {
+				logger.Info("rtp stats",
+					"received", stats.Received,
+					"expected", stats.Expected(),
+					"lost", stats.Lost(),
+					"jitter_ms", stats.JitterMs(),
+				)
 			}
-		})
+		}
 	}
 
 	// Если caller отменяет ctx, то все фоновые горутины этой сессии должны завершиться,
 	// даже если caller забыл вызвать cleanup().
 	go func() {
-		<-ctx.Done()
-		cleanup()
+		select {
+		case <-ctx.Done():
+			cleanup()
+		case <-cleanupDone:
+		}
 	}()
 
 	// 3) RX health loop (для логов)
@@ -198,6 +476,8 @@ func Start(
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-cleanupDone:
 				return
 			case <-t.C:
 				s := rx.StatsSnapshot()
@@ -271,6 +551,9 @@ func Start(
 				case <-ctx.Done():
 					// Note: `sender.StreamFramesAt()` treats a closed `frames` channel as a graceful stop (returns nil).
 					// For `silenceCh`, this is the only close path and it happens on `ctx.Done()`.
+					close(silenceCh)
+					return
+				case <-cleanupDone:
 					close(silenceCh)
 					return
 				case <-ticker.C:

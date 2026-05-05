@@ -11,7 +11,7 @@ import (
 	"bucis-bes_simulator/internal/infra/config"
 )
 
-func TestFSM_PressIgnoredWhileQuerying(t *testing.T) {
+func TestFSM_PressDuringFailedQueryRetries(t *testing.T) {
 	resetCh := make(chan struct{}, 10)
 	pressCh := make(chan struct{}, 1)
 	answers := make(chan answerEvent, 10)
@@ -84,11 +84,10 @@ func TestFSM_PressIgnoredWhileQuerying(t *testing.T) {
 		t.Fatal("timeout waiting for query start")
 	}
 
-	// Second press while querying must be ignored (not queued for later processing).
+	// Second press during query retries: after failure it must start a new query (not discarded).
 	select {
 	case pressCh <- struct{}{}:
 	default:
-		// channel full is fine; it still represents a press during querying
 	}
 
 	// doPress should fail (no answers) and FSM should return to IDLE.
@@ -102,10 +101,14 @@ func TestFSM_PressIgnoredWhileQuerying(t *testing.T) {
 		}
 	}
 
-	// Give time for a (buggy) second press to be processed.
-	time.Sleep(120 * time.Millisecond)
-	if sendCalls.Load() != 1 {
-		t.Fatalf("sendQueryOnce calls=%d want 1 (press during QUERYING must be ignored)", sendCalls.Load())
+	deadlineSecondQuery := time.After(500 * time.Millisecond)
+	for sendCalls.Load() < 2 {
+		select {
+		case <-deadlineSecondQuery:
+			t.Fatalf("sendQueryOnce calls=%d want 2 (press during failed query must retry)", sendCalls.Load())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 
 	cancel()
@@ -486,6 +489,80 @@ func TestFSM_ClientResetDuringSetup_BeforeDialEstablished(t *testing.T) {
 		default:
 			time.Sleep(5 * time.Millisecond)
 		}
+	}
+
+	cancel()
+	<-done
+}
+
+func TestBES_AutoPress_TriggersExactlyOnce(t *testing.T) {
+	resetCh := make(chan struct{}, 10)
+	pressCh := make(chan struct{}, 1)
+	answers := make(chan answerEvent, 10)
+	conversations := make(chan string, 10)
+
+	cfg := config.Bes{EC: config.EC{
+		ClientAnswerTimeout:      200 * time.Millisecond,
+		ClientQueryRetryInterval: 10 * time.Millisecond,
+		ClientQueryMaxRetries:    1,
+	}}
+
+	var st atomic.Uint32
+	var sendCalls atomic.Int32
+
+	fsm := besFSM{
+		cfg:                      cfg,
+		logger:                   nopLogger{},
+		state:                    &st,
+		resetCh:                  resetCh,
+		pressCh:                  pressCh,
+		answers:                  answers,
+		autoPressAfterFirstReset: true,
+		sendQueryOnce: func() error {
+			sendCalls.Add(1)
+			return nil
+		},
+		runSIP: func(
+			ctx context.Context,
+			logger Logger,
+			cfg config.Bes,
+			domain string,
+			sipID string,
+			conversations <-chan string,
+			dialEstablished chan<- struct{},
+		) error {
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fsm.Run(ctx, conversations) }()
+
+	// Отправить два ClientReset — убедиться, что ClientQuery отправлен ровно один раз.
+	resetCh <- struct{}{}
+	resetCh <- struct{}{}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		answers <- answerEvent{answer: &protocol.ClientAnswer{NewIP: "1.2.3.4", SipID: "42"}}
+	}()
+
+	deadline := time.After(500 * time.Millisecond)
+	for sendCalls.Load() < 1 {
+		select {
+		case <-deadline:
+			t.Fatalf("sendQueryOnce calls=%d want 1", sendCalls.Load())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Дать времени "проявиться" лишнему автонажатию (если бы оно было).
+	time.Sleep(50 * time.Millisecond)
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendQueryOnce calls=%d want 1", got)
 	}
 
 	cancel()

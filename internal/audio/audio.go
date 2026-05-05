@@ -21,7 +21,6 @@ type Playback struct {
 	stdin io.WriteCloser
 
 	mu        sync.Mutex
-	buf       []byte
 	closeOnce sync.Once
 }
 
@@ -80,15 +79,12 @@ func (p *Playback) WritePCM(pcm []int16) error {
 	}
 
 	p.mu.Lock()
-	n := len(pcm) * 2
-	if cap(p.buf) < n {
-		p.buf = make([]byte, n)
-	} else {
-		p.buf = p.buf[:n]
+	defer p.mu.Unlock()
+	if p.stdin == nil {
+		return nil
 	}
-	buf := p.buf
-	p.mu.Unlock()
-
+	n := len(pcm) * 2
+	buf := make([]byte, n)
 	for i, s := range pcm {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(s))
 	}

@@ -96,10 +96,15 @@ func TestDoPress_AnswerDuringRetry(t *testing.T) {
 	sendQueryOnce := func() error {
 		n := sendCalls.Add(1)
 		if n == 1 {
-			// Ответ приходит уже после timeout первой попытки,
-			// но во время ожидания retryInterval (между ретраями).
+			// «Фантом»: от первой попытки приходит в буфер во время retry — не должен считаться ответом на вторую.
 			go func() {
 				time.Sleep(40 * time.Millisecond)
+				answers <- answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "stale"}}
+			}()
+		}
+		if n == 2 {
+			go func() {
+				time.Sleep(5 * time.Millisecond)
 				answers <- answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "77"}}
 			}()
 		}
@@ -121,6 +126,67 @@ func TestDoPress_AnswerDuringRetry(t *testing.T) {
 	}
 	if d := time.Since(start); d > cfg.EC.ClientQueryRetryInterval+cfg.EC.ClientAnswerTimeout+150*time.Millisecond {
 		t.Fatalf("unexpectedly slow: elapsed=%v", d)
+	}
+}
+
+// Вариант TestDoPress_AnswerDuringRetry с буфером 1 вместо 8 —
+// поймать потерю ответа (из-за неблокирующей отправки в answers, как в проде).
+func TestDoPress_AnswerDuringRetry_SmallBuffer(t *testing.T) {
+	var sendCalls atomic.Int32
+	answers := make(chan answerEvent, 1)
+
+	trySend := func(ev answerEvent) {
+		select {
+		case answers <- ev:
+		default:
+		}
+	}
+
+	cfg := config.Bes{EC: config.EC{
+		ClientAnswerTimeout:      20 * time.Millisecond,
+		ClientQueryRetryInterval: 120 * time.Millisecond,
+		ClientQueryMaxRetries:    3,
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	sendQueryOnce := func() error {
+		n := sendCalls.Add(1)
+		if n == 1 {
+			// Во время retry-интервала прилетает «фантом» и занимает буфер.
+			go func() {
+				time.Sleep(40 * time.Millisecond)
+				trySend(answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "stale"}})
+			}()
+			// А следом прилетает "правильный" ответ, но он будет дропнут (буфер=1).
+			go func() {
+				time.Sleep(60 * time.Millisecond)
+				trySend(answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "77"}})
+			}()
+		}
+		if n == 3 {
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				trySend(answerEvent{answer: &protocol.ClientAnswer{NewIP: "10.0.0.1", SipID: "77"}})
+			}()
+		}
+		return nil
+	}
+
+	sipID, newIP, err := doPress(ctx, nopLogger{}, cfg, sendQueryOnce, answers, nil)
+	if err != nil {
+		t.Fatalf("doPress error: %v", err)
+	}
+	if sipID != "77" || newIP != "10.0.0.1" {
+		t.Fatalf("got sipID=%q newIP=%q", sipID, newIP)
+	}
+	if got := sendCalls.Load(); got != 3 {
+		t.Fatalf("expected exactly 3 send attempts (answer dropped during retry), got %d", got)
+	}
+	if d := time.Since(start); d < cfg.EC.ClientQueryRetryInterval+cfg.EC.ClientAnswerTimeout+cfg.EC.ClientQueryRetryInterval {
+		t.Fatalf("expected to wait at least two retry intervals, elapsed=%v", d)
 	}
 }
 

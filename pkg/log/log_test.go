@@ -38,6 +38,7 @@ func captureStdout(t *testing.T, fn func()) string {
 func TestInit_JSON_WritesJSON(t *testing.T) {
 	orig := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(orig) })
+	t.Setenv("LOG_LEVEL", "info")
 
 	out := captureStdout(t, func() {
 		Init("json")
@@ -61,6 +62,7 @@ func TestInit_JSON_WritesJSON(t *testing.T) {
 func TestInit_Text_WritesText(t *testing.T) {
 	orig := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(orig) })
+	t.Setenv("LOG_LEVEL", "info")
 
 	out := captureStdout(t, func() {
 		Init("text")
@@ -78,9 +80,44 @@ func TestInit_Text_WritesText(t *testing.T) {
 	}
 }
 
+func TestInit_defaultLevelInfo_hidesDebug(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	t.Setenv("LOG_LEVEL", "")
+
+	out := captureStdout(t, func() {
+		Init("text")
+		slog.Default().Debug("secret")
+		slog.Default().Info("hello")
+	})
+
+	if strings.Contains(out, "secret") {
+		t.Fatalf("debug line should be filtered at default level, got %q", out)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("want info line in output, got %q", out)
+	}
+}
+
+func TestInit_LOG_LEVEL_error_hidesInfo(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	t.Setenv("LOG_LEVEL", "error")
+
+	out := captureStdout(t, func() {
+		Init("text")
+		slog.Default().Info("hello")
+	})
+
+	if strings.Contains(out, "hello") {
+		t.Fatalf("info should be filtered at error level, got %q", out)
+	}
+}
+
 func TestWith_ReturnsLogger(t *testing.T) {
 	orig := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(orig) })
+	t.Setenv("LOG_LEVEL", "info")
 
 	Init("text")
 	l := With("a", 1)

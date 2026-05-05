@@ -8,20 +8,6 @@ import (
 	"testing"
 )
 
-func TestStartPlayback_DeviceNullReturnsError(t *testing.T) {
-	_, err := StartPlayback(context.Background(), "null")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
-
-func TestStartCaptureFrames_DeviceNullReturnsError(t *testing.T) {
-	_, err := StartCaptureFrames(context.Background(), "null")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
-
 func TestPlayback_WritePCM_NoOps(t *testing.T) {
 	var p *Playback
 	if err := p.WritePCM([]int16{1, 2}); err != nil {

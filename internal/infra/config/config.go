@@ -16,6 +16,14 @@ type Bucis struct {
 type Bes struct {
 	EC  EC
 	MAC string
+
+	// Поля SIP_* заполняются в ParseBes() из окружения (после loadDotEnv).
+	// Для тестов и встраивания можно задать вручную; пустой SIPDomain не перезаписывает domain из аргумента RunSIP.
+	SIPDomain    string
+	SIPUserBes   string
+	SIPUserBucis string
+	SIPPort      int
+	SIPPassBes   string
 }
 
 type EC struct {
@@ -36,6 +44,10 @@ type EC struct {
 	ClientQueryMaxRetries    int
 
 	CallSetupTimeout time.Duration
+
+	// 0 => без лимита. Иначе максимальная длительность разговора после подтверждения
+	// ec_client_conversation (или сразу после установления SIP, если sipId пустой).
+	ConversationTimeout time.Duration
 
 	// 0 => без ограничения (по умолчанию, совместимо с текущим поведением).
 	// >0 => sipId = (raw % SipIDModulo), при этом 0 заменяется на SipIDModulo (чтобы sipId не был пустым/нулевым).
@@ -70,7 +82,24 @@ func ParseBes() (Bes, error) {
 	}
 
 	mac := getEnvStringDefault("EC_MAC", "")
-	return Bes{EC: ec, MAC: mac}, nil
+
+	sipPort, err := getEnvIntDefault("SIP_PORT", 5060)
+	if err != nil {
+		return Bes{}, fmt.Errorf("SIP_PORT: %w", err)
+	}
+	if sipPort < 1 || sipPort > 65535 {
+		return Bes{}, fmt.Errorf("SIP_PORT must be in range 1..65535 (got %d)", sipPort)
+	}
+
+	return Bes{
+		EC:           ec,
+		MAC:          mac,
+		SIPDomain:    strings.TrimSpace(os.Getenv("SIP_DOMAIN")),
+		SIPUserBes:   strings.TrimSpace(os.Getenv("SIP_USER_BES")),
+		SIPUserBucis: strings.TrimSpace(os.Getenv("SIP_USER_BUCIS")),
+		SIPPort:      sipPort,
+		SIPPassBes:   os.Getenv("SIP_PASS_BES"),
+	}, nil
 }
 
 func getEnvStringDefault(key, def string) string {
@@ -115,7 +144,7 @@ func parseEC() (EC, error) {
 	if err != nil {
 		return EC{}, err
 	}
-	besQueryDst, err := getEnvIntDefault("EC_BES_QUERY_DST_PORT", q6710)
+	besQueryDst, err := getEnvIntDefault("EC_BES_QUERY_DST_PORT", 6710)
 	if err != nil {
 		return EC{}, err
 	}
@@ -176,6 +205,14 @@ func parseEC() (EC, error) {
 		return EC{}, err
 	}
 
+	conversationTimeout, err := getEnvDurationDefault("EC_CONVERSATION_TIMEOUT", 0)
+	if err != nil {
+		return EC{}, err
+	}
+	if conversationTimeout < 0 {
+		return EC{}, fmt.Errorf("EC_CONVERSATION_TIMEOUT must be >= 0")
+	}
+
 	sipIDModulo, err := getEnvUint64Default("EC_SIPID_MODULO", 0)
 	if err != nil {
 		return EC{}, err
@@ -202,6 +239,8 @@ func parseEC() (EC, error) {
 		ClientQueryMaxRetries:    maxRetries,
 
 		CallSetupTimeout: callSetupTimeout,
+
+		ConversationTimeout: conversationTimeout,
 
 		SipIDModulo: sipIDModulo,
 	}, nil

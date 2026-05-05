@@ -99,8 +99,12 @@ func TestBUCIS_QueryAnswer_StableSipID(t *testing.T) {
 
 	writeQuery := func(mac string) {
 		t.Helper()
+		payload, ferr := protocol.FormatClientQuery(mac)
+		if ferr != nil {
+			t.Fatalf("format query: %v", ferr)
+		}
 		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		if _, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery(mac)), queryDst); err != nil {
+		if _, err := queryConn.WriteToUDP([]byte(payload), queryDst); err != nil {
 			t.Fatalf("write query: %v", err)
 		}
 	}
@@ -221,8 +225,12 @@ func TestBUCIS_SipID_StableAfterModulo_ZeroSipID_NeverReturned(t *testing.T) {
 
 	writeQuery := func(mac string) {
 		t.Helper()
+		payload, ferr := protocol.FormatClientQuery(mac)
+		if ferr != nil {
+			t.Fatalf("format query: %v", ferr)
+		}
 		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		if _, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery(mac)), queryDst); err != nil {
+		if _, err := queryConn.WriteToUDP([]byte(payload), queryDst); err != nil {
 			t.Fatalf("write query: %v", err)
 		}
 	}
@@ -332,8 +340,12 @@ func TestBUCIS_QueryAnswer_SipID_NotStableAcrossRestarts_NoPersistence(t *testin
 
 	writeQuery := func(mac string) {
 		t.Helper()
+		payload, ferr := protocol.FormatClientQuery(mac)
+		if ferr != nil {
+			t.Fatalf("format query: %v", ferr)
+		}
 		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		if _, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery(mac)), queryDst); err != nil {
+		if _, err := queryConn.WriteToUDP([]byte(payload), queryDst); err != nil {
 			t.Fatalf("write query: %v", err)
 		}
 	}
@@ -564,7 +576,11 @@ func TestBUCIS_Answer_NewIP_PriorityFlagsOverEnv(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		_, err := queryConn.WriteToUDP([]byte(protocol.FormatClientQuery("AA:BB:CC:DD:EE:11")), queryDst)
+		payload, ferr := protocol.FormatClientQuery("AA:BB:CC:DD:EE:11")
+		if ferr != nil {
+			t.Fatalf("format query: %v", ferr)
+		}
+		_, err := queryConn.WriteToUDP([]byte(payload), queryDst)
 		if err != nil {
 			t.Fatalf("write query: %v", err)
 		}
@@ -607,11 +623,12 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 	log.Init(os.Getenv("LOG_FORMAT"))
 	logger := log.With("role", "bucis-test")
 
-	// 1) без override: ответ должен прийти на 127.0.0.1:8890
-	{
+	t.Run("no_override_answer_arrives_on_sender_ip", func(t *testing.T) {
+		// без override: ответ должен прийти на 127.0.0.1:8890
 		t.Setenv("EC_BES_ADDR", "")
 
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		done := make(chan error, 1)
 		go func() {
 			done <- app.Run(ctx, logger, app.Options{})
@@ -619,23 +636,26 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 
 		answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
 		if err != nil {
-			cancel()
 			t.Fatalf("listen answer: %v", err)
 		}
+		defer func() { _ = answerConn.Close() }()
 
 		queryDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: q6710}
 		queryConn, err := net.DialUDP("udp4", nil, queryDst)
 		if err != nil {
-			cancel()
-			_ = answerConn.Close()
 			t.Fatalf("dial query: %v", err)
 		}
+		defer func() { _ = queryConn.Close() }()
 
 		buf := make([]byte, 2048)
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-			_, _ = queryConn.Write([]byte(protocol.FormatClientQuery("AA:BB:CC:DD:EE:21")))
+			payload, ferr := protocol.FormatClientQuery("AA:BB:CC:DD:EE:21")
+			if ferr != nil {
+				t.Fatalf("format query: %v", ferr)
+			}
+			_, _ = queryConn.Write([]byte(payload))
 
 			_ = answerConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 			n, _, err := answerConn.ReadFromUDP(buf)
@@ -646,24 +666,22 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 				}
 			}
 			if time.Now().After(deadline) {
-				cancel()
-				_ = queryConn.Close()
-				_ = answerConn.Close()
 				t.Fatalf("expected ec_client_answer on 127.0.0.1 when override is empty (last err=%v)", err)
 			}
 		}
 
 		cancel()
-		_ = queryConn.Close()
-		_ = answerConn.Close()
-		<-done
-	}
+		if err := <-done; err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	})
 
-	// 2) с override на заведомо "чужой" IP: listener 127.0.0.1:8890 не должен получать answer
-	{
+	t.Run("override_answer_does_not_arrive_on_sender_ip", func(t *testing.T) {
+		// с override на заведомо "чужой" IP: listener 127.0.0.1:8890 не должен получать answer
 		t.Setenv("EC_BES_ADDR", "192.0.2.1") // TEST-NET-1
 
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		done := make(chan error, 1)
 		go func() {
 			done <- app.Run(ctx, logger, app.Options{})
@@ -671,23 +689,23 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 
 		answerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: answerPort})
 		if err != nil {
-			cancel()
 			t.Fatalf("listen answer: %v", err)
 		}
+		defer func() { _ = answerConn.Close() }()
 
 		queryDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: q6710}
 		queryConn, err := net.DialUDP("udp4", nil, queryDst)
 		if err != nil {
-			cancel()
-			_ = answerConn.Close()
 			t.Fatalf("dial query: %v", err)
 		}
+		defer func() { _ = queryConn.Close() }()
 
 		_ = queryConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		if _, err := queryConn.Write([]byte(protocol.FormatClientQuery("AA:BB:CC:DD:EE:22"))); err != nil {
-			cancel()
-			_ = queryConn.Close()
-			_ = answerConn.Close()
+		payload, ferr := protocol.FormatClientQuery("AA:BB:CC:DD:EE:22")
+		if ferr != nil {
+			t.Fatalf("format query: %v", ferr)
+		}
+		if _, err := queryConn.Write([]byte(payload)); err != nil {
 			t.Fatalf("write query: %v", err)
 		}
 
@@ -699,9 +717,6 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 			if err == nil {
 				pkt, ok := protocol.Parse(buf[:n])
 				if ok && pkt.Type == protocol.ECPacketClientAnswer && pkt.Answer != nil {
-					cancel()
-					_ = queryConn.Close()
-					_ = answerConn.Close()
 					t.Fatalf("did not expect ec_client_answer on 127.0.0.1 when override points to 192.0.2.1")
 				}
 			}
@@ -711,8 +726,8 @@ func TestBUCIS_BesAddrOverride_SendsAnswerToOverrideNotSenderIP(t *testing.T) {
 		}
 
 		cancel()
-		_ = queryConn.Close()
-		_ = answerConn.Close()
-		<-done
-	}
+		if err := <-done; err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	})
 }

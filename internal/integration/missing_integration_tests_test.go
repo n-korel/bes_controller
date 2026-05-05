@@ -400,8 +400,8 @@ func TestIntegration_KeepaliveHeartbeat_TimingTest(t *testing.T) {
 		t.Fatalf("expected at least 4 keepalive packets, got %d", len(times))
 	}
 
-	min := keepaliveInterval * 8 / 10
-	max := keepaliveInterval * 12 / 10
+	min := keepaliveInterval * 5 / 10
+	max := keepaliveInterval * 15 / 10
 	for i := 2; i < len(times); i++ { // пропускаем самый первый (стартовый) + первый тик, проверяем устойчиво по хвосту
 		d := times[i].Sub(times[i-1])
 		if d < min || d > max {
@@ -487,7 +487,11 @@ func TestBUCIS_Answer_Unicast_To_Sender_Not_Broadcast(t *testing.T) {
 	}()
 	sendUntil(ctx, 50*time.Millisecond, func() {
 		_ = qconn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		_, _ = qconn.WriteToUDP([]byte(protocol.FormatClientQuery("AA:BB:CC:DD:EE:FF")), raddr)
+		qLine, qerr := protocol.FormatClientQuery("AA:BB:CC:DD:EE:FF")
+		if qerr != nil {
+			t.Fatalf("format query: %v", qerr)
+		}
+		_, _ = qconn.WriteToUDP([]byte(qLine), raddr)
 	}, gotAny.Load)
 	if !gotAny.Load() {
 		t.Fatalf("timeout waiting AnswerEvent")

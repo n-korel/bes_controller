@@ -89,6 +89,38 @@ func (r *Receiver) Start() error {
 	return r.StartBySoundType(1)
 }
 
+// StartFromConn starts the receiver using an already-open UDP connection.
+// The conn must be bound to the desired local port; the receiver takes ownership
+// and will close it on Stop().
+func (r *Receiver) StartFromConn(conn *net.UDPConn) error {
+	if conn == nil {
+		return fmt.Errorf("nil conn")
+	}
+	r.mu.Lock()
+	if r.doneCh != nil || r.playing {
+		r.mu.Unlock()
+		return nil
+	}
+	if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		r.mediaPort = a.Port
+	}
+	r.connMu.Lock()
+	r.conn = conn
+	r.connMu.Unlock()
+	r.mode = modeRTP
+	r.playing = true
+	r.runErr = nil
+	r.stopCh = make(chan struct{})
+	r.doneCh = make(chan struct{})
+	r.stats = SessionStats{}
+	stopCh := r.stopCh
+	doneCh := r.doneCh
+	r.mu.Unlock()
+
+	go r.runRTP(conn, stopCh, doneCh)
+	return nil
+}
+
 func (r *Receiver) StartBySoundType(soundType int) error {
 	r.mu.Lock()
 	if r.doneCh != nil || r.playing {
@@ -320,12 +352,12 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 	nowRTPUnits := now.UnixNano() / rtpTickNs
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if !r.playing {
-		r.mu.Unlock()
 		return
 	}
 	s := r.stats
-	r.mu.Unlock()
 
 	s.LastPacket = now
 	if s.Received == 0 {
@@ -337,11 +369,7 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 		s.LastArrival = nowRTPUnits
 		s.LastRTPTs = rtpTs
 		s.MaxRTPTs = rtpTs
-		r.mu.Lock()
-		if r.playing {
-			r.stats = s
-		}
-		r.mu.Unlock()
+		r.stats = s
 		return
 	}
 
@@ -373,11 +401,7 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 	s.LastSeq = seq
 	s.Received++
 
-	r.mu.Lock()
-	if r.playing {
-		r.stats = s
-	}
-	r.mu.Unlock()
+	r.stats = s
 }
 
 func isNewerTimestamp(a, b uint32) bool {

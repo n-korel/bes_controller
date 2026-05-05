@@ -69,6 +69,7 @@
   - `EC_LISTEN_PORT_8890` (default `8890`)
   - `EC_BUCIS_QUERY_PORT_6710` (default `6710`)
   - `EC_BUCIS_QUERY_PORT_7777` (default `7777`)
+  - `EC_BES_QUERY_DST_PORT` (default `6710`) — UDP-порт на `EC_BUCIS_ADDR`, куда BES шлёт `ec_client_query`; **не** выводится из `EC_BUCIS_QUERY_PORT_6710` (это порт прослушивания на BUCIS). Если меняете порт запросов на стороне BUCIS, задайте оба значения согласованно.
   - `EC_BUCIS_ADDR` (default `127.0.0.1`)
   - `EC_BES_BROADCAST_ADDR` (default `192.168.5.255`)
   - `EC_BES_ADDR` (unicast override)
@@ -79,6 +80,7 @@
   - `EC_CLIENT_QUERY_RETRY_INTERVAL` (default `1s`)
   - `EC_CLIENT_QUERY_MAX_RETRIES` (default `3`)
   - `EC_CALL_SETUP_TIMEOUT` (default `15s`)
+  - `EC_CONVERSATION_TIMEOUT` (default `0`, без лимита) — после совпадения `ec_client_conversation` с ожидаемым `sipId` ограничивает длительность разговора на BES (Hangup по таймеру); при пустом `sipId` лимит действует сразу после установления SIP. Если ожидание `ec_client_conversation` истекло по `EC_CALL_SETUP_TIMEOUT`, отдельный лимит разговора **не** включается.
   - `EC_MAC` (optional override MAC detection on `bes`)
 - **SIP** (используются напрямую из окружения):
   - `SIP_USER_BUCIS`, `SIP_PASS_BUCIS`
@@ -528,7 +530,7 @@ sequenceDiagram
 
 Назначение:
 
-- Несёт `sipId` и используется БЭС как **`stopTimer(sipId)`**: остановить аварийный таймер ожидания установления вызова (CallSetupTimeout) и зафиксировать, что вызов принят/разговор состоялся.
+- Несёт `sipId` и используется БЭС как **`stopTimer(sipId)`**: остановить аварийный таймер ожидания установления вызова (CallSetupTimeout) и зафиксировать, что вызов принят/разговор состоялся. После этого, если `EC_CONVERSATION_TIMEOUT` задан положительной длительностью, запускается таймер максимальной длительности разговора.
 - Этот пакет отправляется **после установления вызова** (после SIP `200 OK`/`ACK`, т.е. когда вызов перешёл в `ANSWERED`), а **не после BYE**.
 
 Симулятор должен:
@@ -939,13 +941,14 @@ stateDiagram-v2
 - `ClientQueryMaxRetries`: **3** — число повторов `ClientQuery` (включая первую попытку)
 - `SipRegisterTimeout`: **3s** — ожидание успешного REGISTER (если SIP реальный)
 - `CallSetupTimeout`: **10s** — ожидание установки вызова (200 OK/ACK)
+- `ConversationTimeout`: **0** — без лимита; при положительном значении на BES ограничивает длительность разговора после подтверждения `ClientConversation` (или сразу после SIP, если `sipId` пустой)
 
 Если что-то из этого не нужно в текущей итерации (например, RTP ещё не включён), таймер остаётся в конфиге, но код может его не использовать.
 
 Нормативные уточнения:
 
 - `ClientReset` (от `bucis`) рекомендуется отправлять **сразу при старте**, и затем повторять каждые `ClientResetInterval`.
-- Разговор завершается только по SIP BYE (с любой стороны) или остановке процесса.
+- Разговор завершается по SIP BYE (с любой стороны), остановке процесса или по истечении `ConversationTimeout`, если он задан.
 
 ### 11.2. Сетевые дефолты (порты и адреса)
 
@@ -1005,7 +1008,8 @@ MVP контракт:
   - `EC_BES_BROADCAST_ADDR`: адрес назначения для `ClientReset/KeepAlive` (обычно broadcast `192.168.5.255`; в dev на одной машине допускается unicast `127.0.0.1`, либо broadcast loopback `127.255.255.255`)
   - `EC_BES_ADDR`: опциональный unicast override для `ClientReset/KeepAlive` (если задан — отправляем на него вместо broadcast)
   - `EC_LISTEN_PORT_8890`: порт слушания EC на обеих ролях (8890)
-  - `EC_BUCIS_QUERY_PORT_6710`: основной порт `ClientQuery` (6710)
+  - `EC_BUCIS_QUERY_PORT_6710`: порт прослушивания `ClientQuery` на BUCIS (6710)
+  - `EC_BES_QUERY_DST_PORT`: порт назначения `ClientQuery` на стороне BES (6710 по умолчанию; не привязан к `EC_BUCIS_QUERY_PORT_6710`)
   - `EC_BUCIS_QUERY_PORT_7777`: дополнительный (7777)
 - **SIP**:
   - `SIP_DOMAIN`: IP/host OpenSIPS. В дефолтном стенде обычно совпадает с IP `bucis` (OpenSIPS рядом), но это не обязательное требование.

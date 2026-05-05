@@ -63,6 +63,8 @@ func TestNormalizeSIPID(t *testing.T) {
 	}{
 		{in: "", want: ""},
 		{in: "  ", want: ""},
+		{in: "bes", want: ""},
+		{in: " BES ", want: ""},
 		{in: "bes_1", want: "1"},
 		{in: " bes_001 ", want: "001"},
 		{in: "bEs_1", want: "bEs_1"}, // case-sensitive by design

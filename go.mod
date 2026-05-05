@@ -17,6 +17,8 @@ replace github.com/emiago/sipgox => ./third_party/sipgox
 
 replace github.com/emiago/sipgo => ./third_party/emiago-sipgo
 
+replace github.com/emiago/media => ./third_party/emiago-media
+
 require (
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect

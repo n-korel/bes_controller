@@ -127,6 +127,23 @@ func TestGetEnvUint64Default(t *testing.T) {
 	})
 }
 
+func TestParseBes_BesQueryDstPort_DefaultDoesNotFollowBucis6710(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_BUCIS_QUERY_PORT_6710", "7000")
+	t.Setenv("EC_BES_QUERY_DST_PORT", "")
+
+	cfg, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+	if cfg.EC.QueryPort6710 != 7000 {
+		t.Fatalf("QueryPort6710=%d want 7000", cfg.EC.QueryPort6710)
+	}
+	if cfg.EC.BesQueryDstPort != 6710 {
+		t.Fatalf("BesQueryDstPort=%d want 6710 (default must not track EC_BUCIS_QUERY_PORT_6710)", cfg.EC.BesQueryDstPort)
+	}
+}
+
 func TestParseBrs_Defaults(t *testing.T) {
 	resetDotEnv(t)
 	t.Setenv("EC_LISTEN_PORT_8890", "")
@@ -276,6 +293,40 @@ func TestParseBes_SipIDModulo_OneFails(t *testing.T) {
 func TestParseBes_InvalidDurationFails(t *testing.T) {
 	resetDotEnv(t)
 	t.Setenv("EC_KEEPALIVE_INTERVAL", "nope")
+	_, err := ParseBes()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestParseBes_ConversationTimeout_ParsesAndZeroMeansUnlimited(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_CONVERSATION_TIMEOUT", "45s")
+
+	cfg, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+	if got, want := cfg.EC.ConversationTimeout, 45*time.Second; got != want {
+		t.Fatalf("ConversationTimeout=%s want %s", got, want)
+	}
+
+	resetDotEnv(t)
+	t.Setenv("EC_CONVERSATION_TIMEOUT", "")
+
+	cfg2, err := ParseBes()
+	if err != nil {
+		t.Fatalf("ParseBes: %v", err)
+	}
+	if cfg2.EC.ConversationTimeout != 0 {
+		t.Fatalf("ConversationTimeout=%s want 0", cfg2.EC.ConversationTimeout)
+	}
+}
+
+func TestParseBes_ConversationTimeout_NegativeFails(t *testing.T) {
+	resetDotEnv(t)
+	t.Setenv("EC_CONVERSATION_TIMEOUT", "-1s")
+
 	_, err := ParseBes()
 	if err == nil {
 		t.Fatal("expected error")

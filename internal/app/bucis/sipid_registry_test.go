@@ -61,6 +61,39 @@ func TestSipIDState_BootOverflow_NoCollision(t *testing.T) {
 	}
 }
 
+func TestSipIDState_SeqOverflow(t *testing.T) {
+	s := &sipIDState{
+		boot: 7,
+		seq:  uint32(math.MaxInt32),
+		mod:  0,
+		m:    make(map[string]string),
+		ip:   make(map[string]string),
+		ipr:  make(map[string]string),
+	}
+
+	// seq = MaxInt32 → GetOrCreate не должен паниковать.
+	id1 := s.GetOrCreate("AA:BB:CC:DD:EE:01") // seq -> MaxInt32+1
+	id2 := s.GetOrCreate("AA:BB:CC:DD:EE:02") // seq -> MaxInt32+2
+
+	n1, err := strconv.ParseUint(id1, 10, 64)
+	if err != nil {
+		t.Fatalf("expected sipID to parse as uint64, got id1=%q err=%v", id1, err)
+	}
+	n2, err := strconv.ParseUint(id2, 10, 64)
+	if err != nil {
+		t.Fatalf("expected sipID to parse as uint64, got id2=%q err=%v", id2, err)
+	}
+
+	want1 := (uint64(s.boot) << 32) | uint64(uint32(math.MaxInt32)+1)
+	want2 := (uint64(s.boot) << 32) | uint64(uint32(math.MaxInt32)+2)
+	if n1 != want1 {
+		t.Fatalf("unexpected sipID number: got %d want %d (id1=%q)", n1, want1, id1)
+	}
+	if n2 != want2 {
+		t.Fatalf("unexpected sipID number: got %d want %d (id2=%q)", n2, want2, id2)
+	}
+}
+
 func TestSipIDState_BootUnixNanoFallback_Overflow(t *testing.T) {
 	// UnixNano заведомо больше uint32; важно, чтобы fallback не ломался на переполнении и был детерминирован.
 	unixNano := int64(math.MaxInt64)
@@ -93,6 +126,36 @@ func TestSipIDState_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestSipIDState_SetIP_SameIPNewMAC_ClearsStaleForward(t *testing.T) {
+	s := newSipIDState(0)
+
+	oldID := s.GetOrCreate("AA:BB:CC:DD:EE:01")
+	newID := s.GetOrCreate("AA:BB:CC:DD:EE:02")
+	if oldID == newID {
+		t.Fatalf("expected distinct sipID for distinct MACs: old=%q new=%q", oldID, newID)
+	}
+	ip := "10.0.0.77"
+
+	s.SetIP(oldID, ip)
+	if got, ok := s.GetIP(oldID); !ok || got != ip {
+		t.Fatalf("after SetIP(old): GetIP = %q,%v; want %q,true", got, ok, ip)
+	}
+	if got, ok := s.FindBySenderIP(ip); !ok || got != oldID {
+		t.Fatalf("after SetIP(old): FindBySenderIP = %q,%v; want %q,true", got, ok, oldID)
+	}
+
+	s.SetIP(newID, ip)
+	if _, ok := s.GetIP(oldID); ok {
+		t.Fatalf("after SetIP(new) same IP: GetIP(%q) should be absent; stale forward breaks routing vs FindBySenderIP", oldID)
+	}
+	if got, ok := s.GetIP(newID); !ok || got != ip {
+		t.Fatalf("GetIP(new) = %q,%v; want %q,true", got, ok, ip)
+	}
+	if got, ok := s.FindBySenderIP(ip); !ok || got != newID {
+		t.Fatalf("FindBySenderIP = %q,%v; want %q,true", got, ok, newID)
+	}
 }
 
 func TestBUCIS_ConversationRoutingWithOverride(t *testing.T) {

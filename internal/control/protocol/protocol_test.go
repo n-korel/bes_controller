@@ -44,6 +44,42 @@ func TestProtocol_SemicolonInMACAddress(t *testing.T) {
 	}
 }
 
+func TestProtocol_WhitespaceInsideMACAddress(t *testing.T) {
+	pkt, ok := Parse([]byte("ec_client_query AA:BB CC"))
+	if ok {
+		t.Fatalf("expected ok=false, got pkt=%+v", pkt)
+	}
+}
+
+func TestFormatClientQuery_InvalidMAC(t *testing.T) {
+	_, err := FormatClientQuery("AA:BB CC")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, err = FormatClientQuery("   ")
+	if err == nil {
+		t.Fatal("expected error for empty MAC")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Проверить: MAC с пробелом либо корректно проходит roundtrip,
+// либо явно отклоняется.
+func TestFormatClientQuery_SpaceInMAC(t *testing.T) {
+	_, err := FormatClientQuery("AA:BB CC:DD:EE:FF")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParse_EdgeCases(t *testing.T) {
 	t.Run("client_reset_trailing_tabs", func(t *testing.T) {
 		pkt, ok := Parse([]byte("ec_client_reset 1.2.3.4;5.6.7.8;\t"))
@@ -127,6 +163,7 @@ func TestParseEmptyAndMalformed(t *testing.T) {
 		"ec_client_conversation ;",
 		"ec_client_query",
 		"ec_client_query AA:BB:CC;",
+		"ec_client_query AA:BB CC",
 		"unknown_cmd",
 	}
 	for _, line := range bad {
@@ -143,7 +180,11 @@ func TestFormatters(t *testing.T) {
 	if got, want := FormatClientReset("1.2.3.4", "5.6.7.8"), "ec_client_reset 1.2.3.4;5.6.7.8;"; got != want {
 		t.Fatalf("FormatClientReset: got %q want %q", got, want)
 	}
-	if got, want := FormatClientQuery("AA:BB"), "ec_client_query AA:BB"; got != want {
+	q, err := FormatClientQuery("AA:BB")
+	if err != nil {
+		t.Fatalf("FormatClientQuery: %v", err)
+	}
+	if got, want := q, "ec_client_query AA:BB"; got != want {
 		t.Fatalf("FormatClientQuery: got %q want %q", got, want)
 	}
 	if got, want := FormatClientAnswer("1.2.3.4", "123"), "ec_client_answer 1.2.3.4;123;"; got != want {
@@ -169,7 +210,10 @@ func TestFormatParse_RoundTrip(t *testing.T) {
 		}
 	}
 	{
-		line := FormatClientQuery(" AA:BB:CC ")
+		line, err := FormatClientQuery(" AA:BB:CC ")
+		if err != nil {
+			t.Fatalf("FormatClientQuery: %v", err)
+		}
 		pkt, ok := Parse([]byte(line))
 		if !ok || pkt.Type != ECPacketClientQuery || pkt.Query == nil || pkt.Reset != nil || pkt.Answer != nil || pkt.KeepAlive != nil || pkt.Conversation != nil {
 			t.Fatalf("Parse(query) ok=%v pkt=%+v", ok, pkt)

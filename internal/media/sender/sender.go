@@ -150,9 +150,6 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 			return net.ErrClosed
 		}
 		if _, err := s.write(raw); err != nil {
-			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
-				return fmt.Errorf("context done: %w", ctx.Err())
-			}
 			return fmt.Errorf("udp write: %w", err)
 		}
 
@@ -252,9 +249,6 @@ func (s *Sender) StreamFramesAt(ctx context.Context, t0 int64, frames <-chan []i
 			return net.ErrClosed
 		}
 		if _, err := s.write(raw); err != nil {
-			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
-				return fmt.Errorf("context done: %w", ctx.Err())
-			}
 			return fmt.Errorf("udp write: %w", err)
 		}
 

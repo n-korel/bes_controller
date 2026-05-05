@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"errors"
 	"strings"
+	"unicode"
 )
 
 type ECPacketType uint8
@@ -73,11 +75,8 @@ func Parse(b []byte) (pkt ECPacket, ok bool) {
 		return ECPacket{Type: ECPacketClientReset, Reset: &ClientReset{IPHead1: parts[0], IPHead2: parts[1]}}, true
 
 	case "ec_client_query":
-		mac := strings.TrimSpace(rest)
-		if mac == "" {
-			return ECPacket{}, false
-		}
-		if strings.Contains(mac, ";") {
+		mac, ok := parseClientQueryMACPayload(rest)
+		if !ok {
 			return ECPacket{}, false
 		}
 		return ECPacket{Type: ECPacketClientQuery, Query: &ClientQuery{MAC: mac}}, true
@@ -121,8 +120,28 @@ func FormatClientReset(ipHead1, ipHead2 string) string {
 	return "ec_client_reset " + strings.TrimSpace(ipHead1) + ";" + strings.TrimSpace(ipHead2) + ";"
 }
 
-func FormatClientQuery(mac string) string {
-	return "ec_client_query " + strings.TrimSpace(mac)
+func parseClientQueryMACPayload(rest string) (mac string, ok bool) {
+	mac = strings.TrimSpace(rest)
+	if mac == "" || strings.ContainsFunc(mac, unicode.IsSpace) || strings.Contains(mac, ";") {
+		return "", false
+	}
+	return mac, true
+}
+
+func FormatClientQuery(mac string) (string, error) {
+	normalized, ok := parseClientQueryMACPayload(mac)
+	if !ok {
+		raw := strings.TrimSpace(mac)
+		switch {
+		case raw == "":
+			return "", errors.New("invalid client query MAC: empty")
+		case strings.ContainsFunc(raw, unicode.IsSpace):
+			return "", errors.New("invalid client query MAC: contains whitespace")
+		default:
+			return "", errors.New("invalid client query MAC: semicolon in payload")
+		}
+	}
+	return "ec_client_query " + normalized, nil
 }
 
 func FormatClientAnswer(newIP, sipID string) string {
@@ -137,7 +156,12 @@ func FormatClientConversation(sipID string) string {
 	return "ec_client_conversation " + strings.TrimSpace(sipID) + ";"
 }
 
-func splitNonEmptySemicolonParts(s string) []string {
+func splitNonEmptySemicolonPartsWithTrailing(s string) ([]string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasSuffix(s, ";") {
+		return nil, false
+	}
+	s = strings.TrimSuffix(s, ";")
 	var parts []string
 	for _, part := range strings.Split(s, ";") {
 		part = strings.TrimSpace(part)
@@ -146,14 +170,5 @@ func splitNonEmptySemicolonParts(s string) []string {
 		}
 		parts = append(parts, part)
 	}
-	return parts
-}
-
-func splitNonEmptySemicolonPartsWithTrailing(s string) ([]string, bool) {
-	s = strings.TrimSpace(s)
-	if !strings.HasSuffix(s, ";") {
-		return nil, false
-	}
-	s = strings.TrimSuffix(s, ";")
-	return splitNonEmptySemicolonParts(s), true
+	return parts, true
 }

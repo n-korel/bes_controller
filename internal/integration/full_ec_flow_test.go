@@ -46,6 +46,7 @@ func TestIntegration_FullECFlow(t *testing.T) {
 
 	t.Setenv("EC_BUCIS_QUERY_PORT_6710", strconv.Itoa(q6710))
 	t.Setenv("EC_BUCIS_QUERY_PORT_7777", strconv.Itoa(q7777))
+	t.Setenv("EC_BES_QUERY_DST_PORT", strconv.Itoa(q6710))
 	t.Setenv("EC_LISTEN_PORT_8890", strconv.Itoa(p8890))
 	t.Setenv("EC_BUCIS_ADDR", "127.0.0.1")
 	t.Setenv("EC_BES_BROADCAST_ADDR", "127.0.0.1")

@@ -3,12 +3,17 @@ package protocol
 import "testing"
 
 func FuzzParse(f *testing.F) {
+	qSeed, err := FormatClientQuery("AA:BB:CC:DD:EE:FF")
+	if err != nil {
+		panic(err)
+	}
 	seeds := [][]byte{
 		[]byte(""),
 		[]byte("   "),
 		[]byte("unknown_cmd"),
 		[]byte(FormatClientReset("1.2.3.4", "5.6.7.8")),
-		[]byte(FormatClientQuery("AA:BB:CC:DD:EE:FF")),
+		[]byte(qSeed),
+		[]byte("ec_client_query AA:BB CC"),
 		[]byte(FormatClientAnswer("1.2.3.4", "123")),
 		[]byte(FormatKeepAlive("1.2.3.4", "0")),
 		[]byte(FormatClientConversation("123")),
@@ -36,7 +41,11 @@ func FuzzParse(f *testing.F) {
 			}
 		}
 		if pkt.Query != nil {
-			p2, ok2 := Parse([]byte(FormatClientQuery(pkt.Query.MAC)))
+			formatted, ferr := FormatClientQuery(pkt.Query.MAC)
+			if ferr != nil {
+				t.Fatalf("FormatClientQuery after Parse ok: %v mac=%q", ferr, pkt.Query.MAC)
+			}
+			p2, ok2 := Parse([]byte(formatted))
 			if !ok2 || p2.Type != ECPacketClientQuery || p2.Query == nil || p2.Reset != nil || p2.Answer != nil || p2.KeepAlive != nil || p2.Conversation != nil {
 				t.Fatalf("roundtrip query failed: ok=%v pkt=%+v", ok2, p2)
 			}

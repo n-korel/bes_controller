@@ -8,16 +8,12 @@ import (
 	"time"
 )
 
-type SipIDRegistry interface {
-	GetOrCreate(mac string) string
-	SetIP(sipID, ip string)
-	GetIP(sipID string) (string, bool)
-	FindBySenderIP(ip string) (string, bool)
-}
-
 type sipIDState struct {
-	mu   sync.RWMutex
-	seq  int
+	mu sync.RWMutex
+	// seq — монотонный счётчик, используемый при формировании sipID.
+	// Счётчик имеет ширину 32 бита и при переполнении *циклически* переходит через 0 (wrap-around по модулю 2^32).
+	// Это важно: GetOrCreate не должен паниковать при переполнении seq.
+	seq  uint32
 	boot uint64
 	mod  uint64
 	m    map[string]string // mac -> sipId
@@ -69,7 +65,7 @@ func (s *sipIDState) GetOrCreate(mac string) string {
 	//
 	// Важно: умножение вида `boot*1_000_000 + seq` даёт коллизии, когда seq >= 1_000_000:
 	// (boot=1, seq=1_000_001) и (boot=2, seq=1) дают одно и то же число.
-	raw := (s.boot << 32) | uint64(uint32(s.seq))
+	raw := (s.boot << 32) | uint64(s.seq)
 	if s.mod >= 2 {
 		raw %= s.mod
 		if raw == 0 {
@@ -91,12 +87,17 @@ func (s *sipIDState) SetIP(sipID, ip string) {
 	// Если тот же IP "переехал" на другой sipID (например, БЭС перезапустилась и прислала ClientQuery с новым MAC),
 	// важно чтобы обратный поиск по IP возвращал именно самый свежий sipID.
 	oldIP := s.ip[sipID]
+	prevSipIDAtIP := s.ipr[ip]
+
 	s.ip[sipID] = ip
 
 	if oldIP != "" && oldIP != ip {
 		if cur := s.ipr[oldIP]; cur == sipID {
 			delete(s.ipr, oldIP)
 		}
+	}
+	if prevSipIDAtIP != "" && prevSipIDAtIP != sipID && s.ip[prevSipIDAtIP] == ip {
+		delete(s.ip, prevSipIDAtIP)
 	}
 	s.ipr[ip] = sipID
 }

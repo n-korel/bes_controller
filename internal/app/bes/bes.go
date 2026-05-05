@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,9 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 	}
 	if mac == "" {
 		return fmt.Errorf("failed to detect MAC; set EC_MAC")
+	}
+	if _, err := protocol.FormatClientQuery(mac); err != nil {
+		return fmt.Errorf("invalid EC MAC: %w", err)
 	}
 
 	if opts.RunSIP == nil {
@@ -215,7 +219,11 @@ func Run(ctx context.Context, logger Logger, cfg config.Bes, opts Options) error
 		}
 		defer func() { _ = conn.Close() }()
 		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-		_, err = conn.Write([]byte(protocol.FormatClientQuery(mac)))
+		queryLine, ferr := protocol.FormatClientQuery(mac)
+		if ferr != nil {
+			return fmt.Errorf("format client query: %w", ferr)
+		}
+		_, err = conn.Write([]byte(queryLine))
 		if err != nil {
 			return fmt.Errorf("send query: %w", err)
 		}
@@ -332,6 +340,15 @@ func doPress(
 	cancelCh <-chan struct{},
 ) (sipID string, newIP string, err error) {
 	for attempt := 1; attempt <= cfg.EC.ClientQueryMaxRetries; attempt++ {
+	Drain:
+		for {
+			select {
+			case <-answers:
+			default:
+				break Drain
+			}
+		}
+
 		if err := sendQueryOnce(); err != nil {
 			logger.Warn("ec_client_query send failed", "err", err, "attempt", attempt)
 		} else {
@@ -411,6 +428,8 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 					f.state.Store(st)
 					f.drainAnswers()
 					f.drainPress()
+					f.drainConversations(conversations)
+					f.drainResetBurst()
 					sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers, f.resetCh)
 					if err != nil {
 						if ctx.Err() != nil {
@@ -422,10 +441,9 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 						continue
 					}
 
-					f.drainConversations(conversations)
-					st = stateCallSetup
-					f.state.Store(st)
-					st = f.runSIPAndTrack(ctx, sipID, newIP, conversations)
+					st = sipCallOrchestrator{f: f}.run(ctx, sipID, newIP, conversations)
+				} else {
+					f.drainResetBurst()
 				}
 			}
 
@@ -440,27 +458,26 @@ func (f *besFSM) Run(ctx context.Context, conversations <-chan string) error {
 
 				f.drainPress()
 				f.drainAnswers()
+				f.drainConversations(conversations)
 
+				f.drainResetBurst()
 				sipID, newIP, err := doPress(ctx, f.logger, f.cfg, f.sendQueryOnce, f.answers, f.resetCh)
 				if err != nil {
 					if ctx.Err() != nil {
 						return fmt.Errorf("context done: %w", ctx.Err())
 					}
 					f.logger.Warn("press failed", "err", err)
-					// Ignore any presses that happened while we were querying.
-					f.drainPress()
 					st = stateRegistrationIdle
 					f.state.Store(st)
 					continue
 				}
 
-				f.drainConversations(conversations)
-				st = stateCallSetup
-				f.state.Store(st)
-				st = f.runSIPAndTrack(ctx, sipID, newIP, conversations)
+				st = sipCallOrchestrator{f: f}.run(ctx, sipID, newIP, conversations)
 			}
 
 		default:
+			f.logger.Warn("unexpected bes FSM state, resetting to registration idle", "state", st)
+			besPanicOnUnexpectedFSMState(st)
 			st = stateRegistrationIdle
 			f.state.Store(st)
 		}
@@ -499,62 +516,16 @@ func (f *besFSM) drainPress() {
 	}
 }
 
-func (f *besFSM) runSIPAndTrack(ctx context.Context, sipID, newIP string, conversations <-chan string) uint32 {
-	sipCtx, cancelSIP := context.WithCancel(ctx)
-	defer cancelSIP()
-	defer f.state.Store(stateRegistrationIdle)
-
-	dialEstablishedCh := make(chan struct{}, 1)
-	sipDoneCh := make(chan error, 1)
-
-	f.state.Store(stateCallSetup)
-
-	go func() {
-		sipDoneCh <- f.runSIP(sipCtx, f.logger, f.cfg, newIP, sipID, conversations, dialEstablishedCh)
-	}()
-
-	f.drainPress()
-
-	for ctx.Err() == nil {
+// drainResetBurst drops coalesced reset signals already in resetCh.
+// The channel is never closed; one wake from select plus this drain equals one logical reset burst.
+func (f *besFSM) drainResetBurst() {
+	for {
 		select {
-		case <-ctx.Done():
-			cancelSIP()
-			<-sipDoneCh
-			return stateRegistrationIdle
 		case <-f.resetCh:
-			// ClientReset can happen multiple times while the call is being set up (e.g. user presses again).
-			// It must not cancel SIP; we just drain it to avoid reprocessing stale events.
-		drainReset:
-			for {
-				select {
-				case <-f.resetCh:
-				default:
-					break drainReset
-				}
-			}
-		case <-dialEstablishedCh:
-			f.state.Store(stateInCall)
-
-			for ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					cancelSIP()
-					<-sipDoneCh
-					return stateRegistrationIdle
-				case <-f.resetCh:
-				case <-sipDoneCh:
-					f.drainPress()
-					return stateRegistrationIdle
-				}
-			}
-			return stateRegistrationIdle
-		case <-sipDoneCh:
-			f.drainPress()
-			return stateRegistrationIdle
+		default:
+			return
 		}
 	}
-
-	return stateRegistrationIdle
 }
 
 func firstHardwareMAC() string {
@@ -562,6 +533,7 @@ func firstHardwareMAC() string {
 	if err != nil {
 		return ""
 	}
+	sort.Slice(ifaces, func(i, j int) bool { return ifaces[i].Name < ifaces[j].Name })
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
@@ -586,18 +558,17 @@ func DefaultRunSIP(
 	conversations <-chan string,
 	dialEstablished chan<- struct{},
 ) error {
-	if v := strings.TrimSpace(os.Getenv("SIP_DOMAIN")); v != "" {
-		domain = v
+	if d := strings.TrimSpace(cfg.SIPDomain); d != "" {
+		domain = d
 	}
-	besUser := strings.TrimSpace(os.Getenv("SIP_USER_BES"))
-	bucisUser := strings.TrimSpace(os.Getenv("SIP_USER_BUCIS"))
-	sipPortStr := strings.TrimSpace(os.Getenv("SIP_PORT"))
-	if sipPortStr == "" {
-		sipPortStr = "5060"
+	besUser := strings.TrimSpace(cfg.SIPUserBes)
+	bucisUser := strings.TrimSpace(cfg.SIPUserBucis)
+	sipPort := cfg.SIPPort
+	if sipPort == 0 {
+		sipPort = 5060
 	}
-	sipPort, err := strconv.Atoi(sipPortStr)
-	if err != nil {
-		return fmt.Errorf("SIP_PORT invalid: %w", err)
+	if sipPort < 1 || sipPort > 65535 {
+		return fmt.Errorf("SIP_PORT invalid: %d out of range 1..65535", sipPort)
 	}
 	if besUser == "" {
 		if sipID == "" {
@@ -608,7 +579,7 @@ func DefaultRunSIP(
 	if bucisUser == "" {
 		return fmt.Errorf("SIP_USER_BUCIS must be set")
 	}
-	besPass := os.Getenv("SIP_PASS_BES")
+	besPass := cfg.SIPPassBes
 
 	ua, err := sipgo.NewUA(
 		sipgo.WithUserAgent(besUser),
@@ -634,7 +605,8 @@ func DefaultRunSIP(
 		callSetupTimeout = 15 * time.Second
 	}
 
-	dialCtx, cancelDial := context.WithTimeout(ctx, callSetupTimeout)
+	callSetupDeadline := time.Now().Add(callSetupTimeout)
+	dialCtx, cancelDial := context.WithDeadline(ctx, callSetupDeadline)
 	defer cancelDial()
 	dialog, err := phone.Dial(dialCtx, sip.Uri{User: bucisUser, Host: domain, Port: sipPort}, sipgox.DialOptions{
 		Username: besUser,
@@ -646,12 +618,6 @@ func DefaultRunSIP(
 	}
 	defer func() { _ = dialog.Close() }()
 	logger.Info("sip call established", "to", bucisUser, "domain", domain)
-	if dialEstablished != nil {
-		select {
-		case dialEstablished <- struct{}{}:
-		default:
-		}
-	}
 
 	stopRTP := func() {}
 	hangupAndWait := func() {
@@ -673,10 +639,19 @@ func DefaultRunSIP(
 			"audio_enabled", audio.Enabled(),
 			"audio_device", audio.Device(),
 		)
+		// Take the conn before Close() so there is no window where lport is free
+		// and can be grabbed by another process.
+		rtpConn := dialog.TakeRTPConn()
 		dialog.MediaSession.Close()
 
 		rtpCtx, cancelRTP := context.WithCancel(ctx)
-		cleanup, _, rtpErr := rtpsession.Start(rtpCtx, logger, lport, raddr)
+		var cleanup func()
+		var rtpErr error
+		if rtpConn != nil {
+			cleanup, _, rtpErr = rtpsession.StartFromConn(rtpCtx, logger, rtpConn, raddr)
+		} else {
+			cleanup, _, rtpErr = rtpsession.Start(rtpCtx, logger, lport, raddr)
+		}
 
 		var stopOnce sync.Once
 		stopRTP = func() {
@@ -703,23 +678,34 @@ func DefaultRunSIP(
 		logger.Warn("rtp skipped: missing sdp addresses")
 	}
 
+	if dialEstablished != nil {
+		select {
+		case dialEstablished <- struct{}{}:
+		default:
+		}
+	}
+
+	applyConversationDurationLimit := sipID == ""
 	if sipID != "" {
-		timer := time.NewTimer(callSetupTimeout)
-		defer timer.Stop()
+		waitConvCtx, cancelWaitConv := context.WithDeadline(ctx, callSetupDeadline)
+		defer cancelWaitConv()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-waitConvCtx.Done():
+				if errors.Is(waitConvCtx.Err(), context.DeadlineExceeded) {
+					logger.Warn("ec_client_conversation timeout", "sip_id", sipID, "timeout", callSetupTimeout.String())
+					goto afterConversation
+				}
 				hangupAndWait()
-				return fmt.Errorf("context done: %w", ctx.Err())
+				return fmt.Errorf("context done: %w", waitConvCtx.Err())
 			case <-dialog.Context().Done():
+				stopRTP()
 				return nil
-			case <-timer.C:
-				logger.Warn("ec_client_conversation timeout", "sip_id", sipID, "timeout", callSetupTimeout.String())
-				goto afterConversation
 			case got := <-conversations:
 				if got != sipID {
 					continue
 				}
+				applyConversationDurationLimit = true
 				logger.Info("conversation confirmed via ec", "sip_id", sipID)
 				goto afterConversation
 			}
@@ -727,11 +713,29 @@ func DefaultRunSIP(
 	}
 
 afterConversation:
+	convLimit := cfg.EC.ConversationTimeout
+	if applyConversationDurationLimit && convLimit > 0 {
+		lim := time.NewTimer(convLimit)
+		defer lim.Stop()
+		select {
+		case <-ctx.Done():
+			hangupAndWait()
+			return fmt.Errorf("context done: %w", ctx.Err())
+		case <-dialog.Context().Done():
+			stopRTP()
+			return nil
+		case <-lim.C:
+			logger.Info("conversation duration limit reached", "timeout", convLimit.String())
+			hangupAndWait()
+			return nil
+		}
+	}
 	select {
 	case <-ctx.Done():
 		hangupAndWait()
 		return fmt.Errorf("context done: %w", ctx.Err())
 	case <-dialog.Context().Done():
+		stopRTP()
 		return nil
 	}
 }
